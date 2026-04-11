@@ -87,6 +87,7 @@ class Engine:
         builds clients after each such component completes. Secrets are
         materialized the moment Vault becomes available.
         """
+        self._stage_host_helpers()
         self.state.save_config(config_values)
         actions = self.state.plan_actions(self.manifest, selected_ids, config_values)
         prefix = self.manifest.consul.service_prefix
@@ -353,3 +354,57 @@ class Engine:
         # can be added later if the manifest schema grows a `publishes:` field.
         del component
         return dict(config_values)
+
+    def _stage_host_helpers(self) -> None:
+        """Copy bundled `share/` + manifest `templates/` to state_dir for host scripts.
+
+        The state dir is bind-mounted host→container, so anything written here
+        is visible to bash scripts running under `nsenter --target 1`. Helpers
+        are overwritten on every run so a new image automatically replaces the
+        old copies. Three destinations:
+
+          <state_dir>/bin/        — framework share/ (stackwiz-tls.sh etc.)
+          <state_dir>/templates/  — consumer repo's templates/ (blueprints, nginx
+                                    configs, whatever the consumer ships)
+        """
+        import shutil
+        import stat
+
+        def _copy_dir(src: Path, dst: Path, exec_mode: bool) -> None:
+            dst.mkdir(parents=True, exist_ok=True)
+            for item in src.rglob("*"):
+                rel = item.relative_to(src)
+                target = dst / rel
+                if item.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                elif item.is_file():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(item, target)
+                    if exec_mode:
+                        try:
+                            target.chmod(
+                                target.stat().st_mode
+                                | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+                            )
+                        except OSError:
+                            pass
+
+        share_candidates = [
+            Path("/usr/local/share/stackwiz"),                 # production
+            Path(__file__).parent / "share",                    # dev layout
+        ]
+        share_src = next((p for p in share_candidates if p.exists()), None)
+        if share_src is not None:
+            _copy_dir(share_src, self.state.state_dir / "bin", exec_mode=True)
+            log.info("staged framework helpers at %s/bin", self.state.state_dir)
+        else:
+            log.warning("framework share dir not found; helper scripts not staged")
+
+        manifest_templates = self.executor.manifest_dir / "templates"
+        if manifest_templates.is_dir():
+            _copy_dir(
+                manifest_templates,
+                self.state.state_dir / "templates",
+                exec_mode=False,
+            )
+            log.info("staged manifest templates at %s/templates", self.state.state_dir)

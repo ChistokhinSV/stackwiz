@@ -24,6 +24,10 @@ COPY src ./src
 
 RUN uv pip install --system --no-cache .
 
+# Expose helper scripts at a stable host path for engine staging.
+RUN install -d /usr/local/share/stackwiz && \
+    cp -a /app/src/stackwiz/share/. /usr/local/share/stackwiz/
+
 RUN mkdir -p /manifest /state
 VOLUME ["/manifest", "/state"]
 
