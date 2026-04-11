@@ -265,6 +265,92 @@ Usage:
 ./bootstrap.sh uninstall nginx   # remove a single component
 ```
 
+## Overriding config values before a run
+
+Both the TUI and headless modes build up the config-screen defaults by merging three sources, highest priority first:
+
+1. **`<state_dir>/config.yaml`** — written by the engine at the end of every successful run. Pre-populates the TUI so re-runs remember what you typed last time.
+2. **`<manifest_dir>/.stackwiz.env`** — optional YAML file next to your `components.yaml`. Use this to bake in non-default values that should apply on fresh installs without editing the manifest.
+3. **Manifest `config:` defaults** — the `default:` on each `ConfigField` in `components.yaml`.
+
+Values from earlier sources override later ones. `.stackwiz.env` is a plain YAML map:
+
+```yaml
+# <manifest_dir>/.stackwiz.env
+domain: mycompany.internal
+node_ip: 10.0.50.20
+authentik_hostname: auth.mycompany.internal
+authentik_admin_email: admin@mycompany.internal
+ldap_base_dn: "dc=mycompany,dc=internal"
+tls_mode: auto
+```
+
+In **headless mode** (`run --auto`), `.stackwiz.env` is the *only* way to supply required config values — there's no terminal to prompt on, and required fields without a default will abort the run. In **TUI mode**, `.stackwiz.env` pre-fills the config screen so operators can review and confirm.
+
+You can also pre-seed `<state_dir>/config.yaml` directly on the host if you want the TUI to skip prompting altogether:
+
+```bash
+# On the target VM, before running the TUI
+sudo mkdir -p /var/lib/stackwiz
+sudo tee /var/lib/stackwiz/config.yaml <<EOF
+domain: mycompany.internal
+node_ip: 10.0.50.20
+authentik_hostname: auth.mycompany.internal
+tls_mode: auto
+EOF
+```
+
+This also works when the state dir is on a shared volume (e.g., Vagrant's synced folder) — put your `config.yaml` in the repo and point `STACKWIZ_HOST_STATE_DIR` at it.
+
+### Vagrant-specific workflow
+
+For the 080 consumer on a fixed-IP Vagrant VM, two options work well:
+
+**Option A — commit the overrides to your repo** (recommended for team setups):
+
+```bash
+# On your host machine
+cd 080.consul_vault_authentik
+cat > .stackwiz.env <<EOF
+node_ip: 192.168.56.20
+authentik_hostname: auth.stackwiz.lab
+ldap_base_dn: "dc=stackwiz,dc=lab"
+tls_mode: self-signed
+EOF
+vagrant rsync
+vagrant ssh -c "cd ~/080 && STACKWIZ_IMAGE=stackwiz:dev ./bootstrap.sh"
+```
+
+The TUI launches with those values pre-filled in the config screen, so you just hit Next through each screen.
+
+**Option B — edit the manifest defaults** (for one-off labs):
+
+```yaml
+config:
+  - id: authentik_hostname
+    default: "auth.my-lab.internal"   # change here, re-rsync
+```
+
+Option A is better for anything you want to reproduce. Option B is better when you're the only user of the repo.
+
+### Secrets overrides
+
+`.stackwiz.env` only handles **non-secret config values** (the `config:` section of the manifest). Secrets come from Vault — if you need to pre-seed a specific secret instead of having stackwiz generate it, use a secret with `generate: false` and pre-populate the Vault path via `vault kv put`:
+
+```bash
+# Before the install run
+export VAULT_ADDR=http://127.0.0.1:8200
+export VAULT_TOKEN=$(sudo cat /var/lib/stackwiz/vault-token)
+vault kv put stackwiz/mycompany/admin_password value="existing-password"
+```
+
+```yaml
+secrets:
+  - id: admin_password
+    generate: false            # stackwiz won't generate; operator-provided
+    vault_path: mycompany/admin_password
+```
+
 ## Idempotency guidelines
 
 **stackwiz runs your scripts again on every `run`.** Even though the engine skips components whose version + config-hash haven't changed (status: `noop`), you should still write scripts that survive being invoked multiple times against an already-configured host. This matters because:
