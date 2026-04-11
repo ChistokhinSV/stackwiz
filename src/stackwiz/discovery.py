@@ -49,9 +49,9 @@ def _dns_resolves(host: str) -> bool:
         return False
 
 
-async def _http_ok(url: str, timeout: float = 2.5) -> bool:
+async def _http_ok(url: str, timeout: float = 2.5, verify: bool = True) -> bool:
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=verify) as client:
             response = await client.get(url)
         return response.status_code < 500
     except (httpx.RequestError, httpx.HTTPError):
@@ -102,22 +102,36 @@ async def probe_vault(
     domain: str,
     host_override: str | None = None,
 ) -> ProbeResult:
-    """Find a reachable Vault. Probe order mirrors `probe_consul`."""
+    """Find a reachable Vault. Probe order mirrors `probe_consul`.
+
+    For each candidate address we try HTTPS first (verify disabled for
+    self-signed certs) then plain HTTP, because a TLS-enabled Vault will
+    refuse plaintext requests entirely (see 081's raft + TLS listener),
+    while a non-TLS Vault (80-style) still responds to plain HTTP.
+    """
+    health = "/v1/sys/health?standbyok=true&sealedok=true"
+
+    async def _try(host: str) -> str | None:
+        for scheme in ("https", "http"):
+            url = f"{scheme}://{host}:{VAULT_DEFAULT_PORT}"
+            if await _http_ok(f"{url}{health}", verify=False):
+                return url
+        return None
+
     env_addr = os.environ.get("VAULT_ADDR", "").strip()
     if env_addr:
         addr = _normalize_addr(env_addr, VAULT_DEFAULT_PORT)
-        if await _http_ok(f"{addr}/v1/sys/health?standbyok=true&sealedok=true"):
+        if await _http_ok(f"{addr}{health}", verify=False):
             return ProbeResult(Source.ENV, addr, "VAULT_ADDR")
 
     host = host_override or f"vault.{domain}"
-    addr = f"http://{host}:{VAULT_DEFAULT_PORT}"
-    if _dns_resolves(host) and await _http_ok(
-        f"{addr}/v1/sys/health?standbyok=true&sealedok=true"
-    ):
-        return ProbeResult(Source.DOMAIN, addr, host)
+    if _dns_resolves(host):
+        addr = await _try(host)
+        if addr is not None:
+            return ProbeResult(Source.DOMAIN, addr, host)
 
-    addr = f"http://127.0.0.1:{VAULT_DEFAULT_PORT}"
-    if await _http_ok(f"{addr}/v1/sys/health?standbyok=true&sealedok=true"):
+    addr = await _try("127.0.0.1")
+    if addr is not None:
         return ProbeResult(Source.LOCALHOST, addr, "127.0.0.1")
 
     return ProbeResult(Source.MISSING, None, f"tried {host}, 127.0.0.1")

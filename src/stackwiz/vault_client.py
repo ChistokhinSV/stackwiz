@@ -29,7 +29,14 @@ class VaultClient:
     ) -> None:
         self.address = address.rstrip("/")
         self._token = token or os.environ.get("VAULT_TOKEN", "") or None
-        self._client = hvac.Client(url=self.address, token=self._token)
+        # verify=False: stackwiz is always managing its own Vault (self-bootstrap
+        # or locally adopted), and 081-style TLS deploys use self-signed or
+        # locally-issued certs. Host-level trust is the boundary, not hvac.
+        self._client = hvac.Client(
+            url=self.address,
+            token=self._token,
+            verify=False,
+        )
 
     # --- health / auth ----------------------------------------------------------
 

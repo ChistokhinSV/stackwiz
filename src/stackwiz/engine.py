@@ -141,6 +141,21 @@ class Engine:
                     token = token_file.read_text().strip() if token_file.exists() else None
                     self.consul = ConsulClient(probe.address, token=token)
                     log.info("consul adopted after install: %s", probe.address)
+                    # Retroactively register services for components that ran
+                    # BEFORE consul existed (e.g. 081 installs vault first,
+                    # then consul — without this, vault never gets a catalog
+                    # entry because the client was None when vault ran).
+                    for earlier in self.manifest.topo_order():
+                        if earlier.id == component.id:
+                            break
+                        for svc in earlier.all_consul_services():
+                            try:
+                                self.consul.register_service(earlier, svc)
+                                log.info("%s: retroactively registered in consul as %s",
+                                         earlier.id, svc.name)
+                            except Exception as exc:  # noqa: BLE001
+                                log.warning("%s: retro consul register %s failed: %s",
+                                            earlier.id, svc.name, exc)
             if component.id == "vault" and self.vault is None:
                 probe = await probe_vault(self.manifest.domain, self.manifest.vault_host)
                 if probe.reachable and probe.address:
