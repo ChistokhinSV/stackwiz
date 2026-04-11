@@ -214,6 +214,111 @@ def _describe(component: Component) -> str:
     return component.name
 
 
+@main.command("init-env")
+@_shared_opts
+@click.option("--output", "output_path", type=click.Path(path_type=Path),
+              default=None,
+              help="Destination file (default: <manifest_dir>/.stackwiz.env).")
+@click.option("--force", is_flag=True, default=False,
+              help="Overwrite the destination file if it already exists.")
+def init_env(
+    manifest_path: Path,
+    state_dir: Path,  # noqa: ARG001 — unused but shared across subcommands
+    output_path: Path | None,
+    force: bool,
+) -> None:
+    """Generate a commented `.stackwiz.env` scaffold from the manifest.
+
+    Reads every `config:` field + the top-level `domain:`, applies any
+    existing overrides, and writes a YAML file with one entry per field
+    plus a `# help:` comment line.
+
+    Operators edit the generated file once per deployment, then run
+    `wizinstall run` — the TUI pre-fills every field from the file, and
+    `run --auto` uses it as the source of truth for required values.
+    """
+    manifest = _load(manifest_path)
+    manifest_dir = manifest_path.parent.resolve()
+    target = (output_path or manifest_dir / ".stackwiz.env").resolve()
+
+    if target.exists() and not force:
+        click.echo(
+            f"error: {target} already exists. Pass --force to overwrite.",
+            err=True,
+        )
+        sys.exit(2)
+
+    from stackwiz.config_overrides import effective_config
+    existing = _try_read_existing(target)
+    values, domain = effective_config(manifest, existing, None)
+
+    header = (
+        f"# stackwiz consumer config overrides for "
+        f"{manifest.display_name} v{manifest.version}"
+    )
+    lines: list[str] = []
+    lines.append(header)
+    lines.append("#")
+    lines.append("# Edit values below. Placeholders like ${domain} are resolved at load time,")
+    lines.append("# so changing `domain:` cascades through any field that references it.")
+    lines.append("# Precedence (highest wins):")
+    lines.append("#   <state_dir>/config.yaml > this file > manifest `default:` fields")
+    lines.append("")
+    lines.append("# ---- Deployment domain ----")
+    lines.append("# Drives Consul/Vault service discovery (consul.<domain> / vault.<domain>)")
+    lines.append("# and is referenced via ${domain} by other fields below.")
+    lines.append(f'domain: "{domain}"')
+    lines.append("")
+    lines.append("# ---- Component configuration ----")
+    for field in manifest.config:
+        if field.help:
+            lines.append(f"# {field.label}: {field.help}")
+        else:
+            lines.append(f"# {field.label}")
+        if field.type == "select" and field.choices:
+            lines.append(f"#   choices: {', '.join(field.choices)}")
+        if field.required:
+            lines.append("#   required")
+        val = values.get(field.id, field.default)
+        lines.append(_yaml_line(field.id, val))
+        lines.append("")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("\n".join(lines), encoding="utf-8")
+    try:
+        target.chmod(0o600)
+    except OSError:
+        pass
+    click.echo(f"wrote {target}")
+    click.echo("Edit it and re-run `wizinstall run` to pick up the overrides.")
+
+
+def _try_read_existing(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        import yaml
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _yaml_line(key: str, value: object) -> str:
+    """Emit `key: value` with appropriate YAML quoting."""
+    if value is None:
+        return f"{key}: null"
+    if isinstance(value, bool):
+        return f"{key}: {'true' if value else 'false'}"
+    if isinstance(value, (int, float)):
+        return f"{key}: {value}"
+    s = str(value)
+    # Always quote strings for safety (avoids YAML parsing surprises for
+    # values that look numeric, like IP addresses).
+    escaped = s.replace('"', '\\"')
+    return f'{key}: "{escaped}"'
+
+
 @main.command()
 @_shared_opts
 @click.option("--show-secrets", is_flag=True, default=False,

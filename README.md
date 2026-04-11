@@ -173,6 +173,7 @@ wizinstall uninstall --auto         # headless teardown
 wizinstall uninstall nginx          # remove a single component
 wizinstall list                     # print install order with indices + current state
 wizinstall validate                 # parse the manifest, print the install order, exit
+wizinstall init-env                 # generate a commented .stackwiz.env scaffold from the manifest
 wizinstall info                     # show installed components + URLs + masked secret paths
 wizinstall info --show-secrets      # unmask Vault values
 wizinstall info --format {text|markdown|json}

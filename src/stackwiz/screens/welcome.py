@@ -38,7 +38,7 @@ class WelcomeScreen(Screen):
                 yield Label(f"[b]{self.installer.manifest.display_name}[/b] "
                             f"v{self.installer.manifest.version}", id="title")
                 yield Static(f"Mode: [cyan]{self.installer.mode}[/cyan]")
-                yield Static(f"Domain: [cyan]{self.installer.manifest.domain}[/cyan]")
+                yield Static(f"Domain: [cyan]{self.installer.effective_domain}[/cyan]")
                 yield Static(
                     f"Host: {platform.system()} {platform.release()} "
                     f"({platform.machine()})"
@@ -61,9 +61,13 @@ class WelcomeScreen(Screen):
     @work(exclusive=True)
     async def run_probes(self) -> None:
         manifest = self.installer.manifest
-        self.consul_result = await probe_consul(manifest.domain, manifest.consul_host)
+        # Use the effective domain (manifest default merged with overrides from
+        # .stackwiz.env and prior state.config()) so operator changes take
+        # effect BEFORE the welcome screen probes.
+        domain = self.installer.effective_domain
+        self.consul_result = await probe_consul(domain, manifest.consul_host)
         self.query_one("#consul-line", Static).update(_format_probe("Consul", self.consul_result))
-        self.vault_result = await probe_vault(manifest.domain, manifest.vault_host)
+        self.vault_result = await probe_vault(domain, manifest.vault_host)
         self.query_one("#vault-line", Static).update(_format_probe("Vault", self.vault_result))
 
         missing = []

@@ -11,9 +11,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from stackwiz import log as log_module
+from stackwiz.config_overrides import effective_config
 from stackwiz.consul_client import ConsulClient
 from stackwiz.discovery import probe_consul, probe_vault
 from stackwiz.engine import Engine, Status, StepEvent
@@ -25,19 +24,11 @@ from stackwiz.vault_client import VaultClient
 log = logging.getLogger("stackwiz.headless")
 
 
-def _load_config_values(manifest: Manifest, state: State, env_file: Path | None) -> dict[str, Any]:
-    """Resolve config values in order of priority: env file → state → manifest defaults."""
-    values: dict[str, Any] = {}
-    for field in manifest.config:
-        values[field.id] = field.default
-    values.update(state.config())
-    if env_file is not None and env_file.exists():
-        try:
-            overrides = yaml.safe_load(env_file.read_text(encoding="utf-8")) or {}
-            if isinstance(overrides, dict):
-                values.update(overrides)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("could not read %s: %s", env_file, exc)
+def _load_config_values(
+    manifest: Manifest, state: State, env_file: Path | None
+) -> tuple[dict[str, Any], str]:
+    """Resolve config values using the shared override+substitution helper."""
+    values, domain = effective_config(manifest, state.config(), env_file)
     missing = [
         f.id for f in manifest.config if f.required and (values.get(f.id) in (None, ""))
     ]
@@ -46,7 +37,7 @@ def _load_config_values(manifest: Manifest, state: State, env_file: Path | None)
             f"headless mode requires values for required config: {', '.join(missing)}. "
             f"Provide them in /manifest/.stackwiz.env (YAML)."
         )
-    return values
+    return values, domain
 
 
 async def _run(
@@ -60,8 +51,13 @@ async def _run(
     state = State(state_dir)
     executor = Executor(manifest_dir=manifest_dir)
 
-    consul_probe = await probe_consul(manifest.domain, manifest.consul_host)
-    vault_probe = await probe_vault(manifest.domain, manifest.vault_host)
+    # Compute effective config + domain (state > .stackwiz.env > defaults, with
+    # ${var} substitution) so probes use the overridden domain.
+    config_values, effective_domain = _load_config_values(manifest, state, config_env_file)
+    print(f"[auto] effective domain: {effective_domain}")
+
+    consul_probe = await probe_consul(effective_domain, manifest.consul_host)
+    vault_probe = await probe_vault(effective_domain, manifest.vault_host)
 
     consul_client: ConsulClient | None = None
     vault_client: VaultClient | None = None
@@ -105,7 +101,6 @@ async def _run(
             selected = {
                 c.id for c in manifest.components if c.required or c.default
             }
-        config_values = _load_config_values(manifest, state, config_env_file)
         print(f"[auto] selected: {', '.join(sorted(selected))}")
         print(f"[auto] config: {config_values}")
         print("[auto] starting install")

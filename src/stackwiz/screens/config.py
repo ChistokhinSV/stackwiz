@@ -51,21 +51,13 @@ class ConfigScreen(Screen):
         yield Footer()
 
     def _initial_values(self) -> dict[str, Any]:
-        """Layer config defaults: state (last run) > .stackwiz.env > manifest defaults."""
-        values: dict[str, Any] = {
-            f.id: f.default for f in self.installer.manifest.config
-        }
-        env_file = self.installer.manifest_dir / ".stackwiz.env"
-        if env_file.exists():
-            try:
-                import yaml
-                overrides = yaml.safe_load(env_file.read_text(encoding="utf-8")) or {}
-                if isinstance(overrides, dict):
-                    values.update(overrides)
-            except Exception:  # noqa: BLE001 — invalid YAML just falls back
-                pass
-        values.update(self.installer.state.config())
-        return values
+        """Use the pre-computed effective_config from the app.
+
+        The app already merged state > .stackwiz.env > manifest defaults and
+        ran `${var}` substitution, so we just read from there. The welcome
+        screen uses the same map for its probe, keeping everything consistent.
+        """
+        return dict(self.installer.effective_config)
 
     def _build_widget(self, field: ConfigField, default: Any):
         wid = f"cfg-{field.id}"

@@ -7,6 +7,7 @@ from typing import Literal
 from textual.app import App
 
 from stackwiz import log as log_module
+from stackwiz.config_overrides import effective_config
 from stackwiz.consul_client import ConsulClient
 from stackwiz.discovery import ProbeResult
 from stackwiz.manifest import Manifest
@@ -47,7 +48,17 @@ class InstallerApp(App[int]):
 
         self.selected_component_ids: set[str] = set()
         self.selection_locked: bool = False  # True when CLI pre-selected components
-        self.config_values: dict[str, object] = {}
+
+        # Compute effective config (state > .stackwiz.env > manifest defaults) +
+        # effective domain once at startup; welcome probe + config screen both use
+        # these so overrides take effect BEFORE the operator sees the TUI.
+        env_file = self.manifest_dir / ".stackwiz.env"
+        effective_values, effective_domain = effective_config(
+            manifest, self.state.config(), env_file,
+        )
+        self.effective_config: dict[str, object] = dict(effective_values)
+        self.effective_domain: str = effective_domain
+        self.config_values: dict[str, object] = dict(effective_values)
 
         self.consul_probe: ProbeResult | None = None
         self.vault_probe: ProbeResult | None = None

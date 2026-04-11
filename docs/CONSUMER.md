@@ -273,17 +273,97 @@ Both the TUI and headless modes build up the config-screen defaults by merging t
 2. **`<manifest_dir>/.stackwiz.env`** — optional YAML file next to your `components.yaml`. Use this to bake in non-default values that should apply on fresh installs without editing the manifest.
 3. **Manifest `config:` defaults** — the `default:` on each `ConfigField` in `components.yaml`.
 
-Values from earlier sources override later ones. `.stackwiz.env` is a plain YAML map:
+Values from earlier sources override later ones.
+
+### Domain-derived values via `${var}` substitution
+
+Manifest `default:` strings can reference other field values using `${id}` syntax. The most common use is deriving per-service hostnames from a single **deployment domain**:
+
+```yaml
+# components.yaml
+domain: "stackwiz.lab"              # top-level; also referenceable via ${domain}
+
+config:
+  - id: authentik_hostname
+    default: "auth.${domain}"        # resolves to auth.stackwiz.lab
+  - id: authentik_admin_email
+    default: "admin@${domain}"       # resolves to admin@stackwiz.lab
+  - id: ldap_base_dn
+    default: "${domain_dn}"          # synthetic: dc=stackwiz,dc=lab
+```
+
+Synthetic variables injected by the framework:
+
+| Variable | Value |
+|---|---|
+| `${domain}` | the effective deployment domain (manifest default, overridable via `.stackwiz.env` or state) |
+| `${domain_dn}` | `domain` rendered as an LDAP base DN — `stackwiz.lab` → `dc=stackwiz,dc=lab` |
+
+Plus `${<field_id>}` for any field in the `config:` section. Substitution is recursive (up to 4 hops) so chains like `a.${b}` where `b: "x.${domain}"` work. Unknown `${...}` placeholders stay literal.
+
+**Override-once, cascade-everywhere**: an operator only needs to set `domain: mycompany.internal` in `.stackwiz.env` and all derived fields automatically become `auth.mycompany.internal`, `admin@mycompany.internal`, `dc=mycompany,dc=internal`. Both the welcome screen (for service discovery) and the config screen (for the form pre-fill) see the same resolved values.
+
+### Generating the `.stackwiz.env` scaffold
+
+Instead of writing `.stackwiz.env` from scratch, generate a commented template from the manifest:
+
+```bash
+wizinstall init-env --manifest components.yaml
+# wrote <manifest_dir>/.stackwiz.env
+# Edit it and re-run `wizinstall run` to pick up the overrides.
+```
+
+The generated file contains the deployment domain at the top (commented with an explanation), followed by one entry per `config:` field with:
+- A `# <label>: <help>` header
+- `#   choices: ...` if the field is a `type: select`
+- `#   required` if the field is mandatory
+- The current effective value (post-substitution) as the YAML value
+
+Re-running `init-env` refuses to overwrite unless you pass `--force`. It reads any existing `.stackwiz.env` first so editing + regenerating preserves your changes.
+
+Example output for 080:
+
+```yaml
+# stackwiz consumer config overrides for Consul + Vault + Authentik v1.1.0
+#
+# Edit values below. Placeholders like ${domain} are resolved at load time,
+# so changing `domain:` cascades through any field that references it.
+
+domain: "stackwiz.lab"
+
+# Private network IP of this node: Used for Consul bind_addr and Vault api_addr
+#   required
+node_ip: "192.168.56.20"
+
+# Authentik public hostname: Derives from the top-level domain unless overridden
+#   required
+authentik_hostname: "auth.stackwiz.lab"
+
+# Authentik admin email
+#   required
+authentik_admin_email: "admin@stackwiz.lab"
+
+# LDAP base DN: Auto-derives from ${domain} (stackwiz.lab → dc=stackwiz,dc=lab)
+#   required
+ldap_base_dn: "dc=stackwiz,dc=lab"
+
+# TLS certificate mode: auto = try Cloudflare/Route53/HTTP-01 then fall back to self-signed
+#   choices: self-signed, auto, letsencrypt
+tls_mode: "self-signed"
+```
+
+### Raw `.stackwiz.env` example
+
+If you prefer hand-writing the file, just put the fields you want to override:
 
 ```yaml
 # <manifest_dir>/.stackwiz.env
 domain: mycompany.internal
 node_ip: 10.0.50.20
-authentik_hostname: auth.mycompany.internal
-authentik_admin_email: admin@mycompany.internal
-ldap_base_dn: "dc=mycompany,dc=internal"
 tls_mode: auto
 ```
+
+Everything else (authentik_hostname, ldap_base_dn, etc.) is computed from `${domain}` — you don't need to list them unless you want a non-derived value.
 
 In **headless mode** (`run --auto`), `.stackwiz.env` is the *only* way to supply required config values — there's no terminal to prompt on, and required fields without a default will abort the run. In **TUI mode**, `.stackwiz.env` pre-fills the config screen so operators can review and confirm.
 
