@@ -252,6 +252,10 @@ class Engine:
         env: dict[str, str],
     ) -> AsyncIterator[StepEvent]:
         queue: asyncio.Queue[StepEvent] = asyncio.Queue()
+        # Dedicated per-component logger so log lines carry the component id
+        # without string formatting on every line.
+        script_log = logging.getLogger(f"stackwiz.script.{component.id}")
+        script_log.info("→ running %s (%s)", script, action.value)
 
         async def pump() -> None:
             try:
@@ -259,6 +263,7 @@ class Engine:
                     if stream == "exit":
                         code = int(text)
                         if code == 0:
+                            script_log.info("← exit 0 (ok)")
                             await queue.put(
                                 StepEvent(
                                     component.id, Status.RUNNING, action,
@@ -266,6 +271,7 @@ class Engine:
                                 )
                             )
                         else:
+                            script_log.error("← exit %d (FAILED)", code)
                             await queue.put(
                                 StepEvent(
                                     component.id, Status.FAILED, action,
@@ -273,6 +279,15 @@ class Engine:
                                 )
                             )
                     else:
+                        # Forward every stdout/stderr line to install.log at
+                        # INFO (stdout) or WARNING (stderr) level. This is the
+                        # primary forensic trail — both TUI and headless modes
+                        # get it because log_module.configure() is called in
+                        # both app.py and headless.py.
+                        if stream == "stderr":
+                            script_log.warning("%s", text)
+                        else:
+                            script_log.info("%s", text)
                         await queue.put(
                             StepEvent(
                                 component.id, Status.RUNNING, action,

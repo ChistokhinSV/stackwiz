@@ -165,7 +165,7 @@ def run_headless(
     selected_override: set[str] | None = None,
 ) -> int:
     state_dir.mkdir(parents=True, exist_ok=True)
-    log_module.configure(state_dir)
+    log_module.configure(state_dir, mode=f"headless:{mode}")
     return asyncio.run(
         _run(manifest, state_dir, manifest_dir, mode, config_env_file, selected_override)
     )

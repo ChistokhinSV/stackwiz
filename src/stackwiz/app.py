@@ -67,7 +67,7 @@ class InstallerApp(App[int]):
 
         self.materialized_secrets: dict[str, object] = {}
 
-        log_module.configure(state_dir)
+        log_module.configure(state_dir, mode=f"tui:{mode}")
 
     def on_mount(self) -> None:
         from stackwiz.screens.welcome import WelcomeScreen
