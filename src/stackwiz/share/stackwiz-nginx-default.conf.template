@@ -12,8 +12,9 @@ server {
 }
 
 server {
-    listen 443 ssl;
-    http2 on;
+    # Single-line ssl+http2 for nginx < 1.25 (Debian 12 ships 1.22); newer
+    # nginx ignores the trailing "http2" and honors `http2 on;` separately.
+    listen 443 ssl http2;
     server_name __SERVER_NAME__;
 
     ssl_certificate     __SSL_CERT__;
