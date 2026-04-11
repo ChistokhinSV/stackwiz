@@ -79,6 +79,7 @@ class InstallerApp(App[int]):
 
         self.selected_component_ids: set[str] = set()
         self.selection_locked: bool = False  # True when CLI pre-selected components
+        self.forced_refresh: set[str] = set()  # From `run --force` or `refresh` CLI
 
         # Compute effective config (state > .stackwiz.env > manifest defaults) +
         # effective domain once at startup; welcome probe + config screen both use

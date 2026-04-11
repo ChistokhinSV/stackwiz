@@ -103,11 +103,16 @@ def main(ctx: click.Context) -> None:
 @_shared_opts
 @click.option("--auto", "auto_mode", is_flag=True, default=False,
               help="Run headless (no TUI).")
+@click.option("--force", "force_refresh", is_flag=True, default=False,
+              help="Re-run selected components with Action.REFRESH even if "
+                   "nothing changed. Alias for `wizinstall refresh` with the "
+                   "same selection.")
 @click.argument("components", nargs=-1)
 def run(
     manifest_path: Path,
     state_dir: Path,
     auto_mode: bool,
+    force_refresh: bool,
     components: tuple[str, ...],
 ) -> None:
     """Install components from the manifest.
@@ -115,15 +120,82 @@ def run(
     With no COMPONENTS args, installs everything required+default (headless)
     or prompts via the TUI. With COMPONENTS args, installs only the listed
     components (ids or 1-based indices from `wizinstall list`).
+
+    Use `--force` to re-run even when the engine would otherwise NOOP — the
+    specified components run with Action.REFRESH and `WIZ_ACTION=refresh`
+    set in the script env.
     """
     manifest = _load(manifest_path)
     state_dir.mkdir(parents=True, exist_ok=True)
     manifest_dir = manifest_path.parent.resolve()
     selected_override: set[str] | None = None
+    forced_refresh: set[str] | None = None
     if components:
         selected_override = resolve_selection(manifest, components)
+    if force_refresh:
+        forced_refresh = selected_override or {
+            c.id for c in manifest.components if c.required or c.default
+        }
     _dispatch(
-        "install", manifest, state_dir, manifest_dir, auto_mode, selected_override
+        "install", manifest, state_dir, manifest_dir, auto_mode,
+        selected_override, forced_refresh,
+    )
+
+
+@main.command()
+@_shared_opts
+@click.option("--auto", "auto_mode", is_flag=True, default=False,
+              help="Run headless (no TUI).")
+@click.argument("components", nargs=-1)
+def refresh(
+    manifest_path: Path,
+    state_dir: Path,
+    auto_mode: bool,
+    components: tuple[str, ...],
+) -> None:
+    """Force-re-run installed components without a config change.
+
+    Every selected component is run with Action.REFRESH and
+    `WIZ_ACTION=refresh` set in the script env, regardless of whether
+    anything in the manifest or state changed. Use this for steps that
+    pull from upstream on every run — git-synced ansible playbooks,
+    template provisioning, kubernetes manifest re-application.
+
+    With no COMPONENTS args, refreshes every currently-installed component.
+    With COMPONENTS args, refreshes only the listed ones (ids or 1-based
+    indices from `wizinstall list`).
+
+    Equivalent to `wizinstall run --force [COMPONENTS...]`.
+    """
+    manifest = _load(manifest_path)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    manifest_dir = manifest_path.parent.resolve()
+
+    from stackwiz.state import State
+    state = State(state_dir)
+    if components:
+        selected = resolve_selection(manifest, components)
+        # Restrict to things that are actually installed; trying to refresh
+        # something that was never installed makes no sense.
+        installed_ids = set(state.installed().keys())
+        missing = selected - installed_ids
+        if missing:
+            click.echo(
+                f"note: not installed (will install from scratch): "
+                f"{', '.join(sorted(missing))}"
+            )
+    else:
+        selected = set(state.installed().keys())
+        if not selected:
+            click.echo(
+                "error: nothing installed yet; run `wizinstall run` first",
+                err=True,
+            )
+            sys.exit(2)
+
+    _dispatch(
+        "install", manifest, state_dir, manifest_dir, auto_mode,
+        selected, forced_refresh=selected,
     )
 
 
@@ -366,6 +438,7 @@ def _dispatch(
     manifest_dir: Path,
     auto_mode: bool,
     selected_override: set[str] | None = None,
+    forced_refresh: set[str] | None = None,
 ) -> None:
     if auto_mode:
         from stackwiz.headless import run_headless
@@ -377,6 +450,7 @@ def _dispatch(
             mode=mode,
             config_env_file=env_file,
             selected_override=selected_override,
+            forced_refresh=forced_refresh,
         ))
 
     from stackwiz.app import InstallerApp
@@ -389,4 +463,6 @@ def _dispatch(
     if selected_override is not None:
         app.selected_component_ids = selected_override
         app.selection_locked = True
+    if forced_refresh is not None:
+        app.forced_refresh = forced_refresh
     sys.exit(app.run() or 0)

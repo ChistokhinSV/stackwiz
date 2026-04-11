@@ -447,16 +447,82 @@ secrets:
 
 ### What "safe to re-run" actually means
 
-The engine pre-filters re-runs via version + config-hash diffs. Your script only sees four possible `WIZ_ACTION` values, and each has a different contract:
+The engine pre-filters re-runs via version + config-hash diffs. Your script sees one of five `WIZ_ACTION` values, each with a different contract:
 
 | Action | When | Your script MAY… | Your script MUST NOT… |
 |---|---|---|---|
-| **(not run)** | `noop` — version + config unchanged | *script isn't invoked at all* | — |
+| **(not run)** | `noop` — version + config unchanged, component not `repeatable` | *script isn't invoked at all* | — |
 | `install` | Component not in `/state/installed.yaml` (first run, post-uninstall, or operator removed the entry) | wipe stale data from prior failed attempts, re-create users/dirs, re-initialize databases | destroy data that the operator explicitly didn't ask to be re-initialized (e.g. don't wipe user-uploaded files) |
 | `reconfigure` | Version unchanged, config-hash changed | overwrite config files, reload services, re-render blueprints | drop databases, regenerate secrets, erase volumes, force a full restart unless strictly necessary |
 | `upgrade` | Version differs from `installed.yaml` | run version-specific migrations, pull new images, rewrite binaries | assume the old version's data schema is compatible without inspection |
+| `refresh` | Component has `repeatable: true` in the manifest, **or** operator ran `wizinstall refresh`, **or** operator ran `wizinstall run --force` | pull upstream data (git, helm charts, templates), re-seed databases with current fixtures, re-apply idempotent manifests, hit external APIs to sync state | modify the component's version or config-hash — refresh is a read-heavy action, not a state change |
 
-**The `install` action is the escape hatch for fresh state.** It's the only action where data destruction is appropriate. On a reinstall after uninstall, operators expect fresh state. On a first install, there's nothing to preserve. The authentik component in [`080`](https://github.com/ChistokhinSV/stackwiz/tree/main/../080.consul_vault_authentik/install/authentik.sh) uses this to wipe a stale postgres volume only on `WIZ_ACTION=install`:
+### Repeatable components + `wizinstall refresh`
+
+Some components are inherently **repeatable** — operators *want* to re-run them on demand, not only when something changed. Classic examples from `061.awx_installation`:
+
+- **Template provisioning**: the installer clones a git repo and runs a provisioning script. Operators push changes upstream, then want the installer to re-pull and re-apply.
+- **Project sync**: AWX's `project_sync` pulls inventory/playbooks from git.
+- **Helm chart upgrade**: `helm upgrade --install` is naturally idempotent and should be re-runnable at will.
+
+stackwiz supports this with **two complementary mechanisms**:
+
+**1. Manifest flag `repeatable: true`** — mark components that should always re-run when `wizinstall run` is invoked, regardless of config-hash. The engine replans them as `Action.REFRESH` instead of `Action.NOOP`. Use this for things the operator wants to keep in sync automatically on every run:
+
+```yaml
+components:
+  - id: provision_templates
+    name: "Provision AWX job templates"
+    repeatable: true              # runs on every `wizinstall run`, no config change needed
+    install: install/provision_templates.sh
+    depends: [awx]
+```
+
+**2. CLI force-refresh** — explicit operator action for one-off re-runs on components that aren't flagged `repeatable`:
+
+```bash
+wizinstall refresh                        # refresh every installed component
+wizinstall refresh awx                    # refresh only awx
+wizinstall refresh provision_templates    # refresh a single step
+wizinstall run --force                    # equivalent to `refresh` with the same selection
+wizinstall run --force awx                # force-refresh awx only
+```
+
+`refresh` and `run --force` both set `WIZ_ACTION=refresh` + `WIZ_REFRESH=1` on the script env. Components with a pending `install` / `upgrade` / `reconfigure` action keep their normal action — refresh only overrides `noop`. Forced refresh never downgrades an UPGRADE, so you can safely chain `wizinstall run --force` without worrying about losing a version bump.
+
+**Script pattern** for a repeatable component:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO="${WIZ_CFG_TEMPLATE_REPO:?missing template_repo}"
+BRANCH="${WIZ_CFG_TEMPLATE_BRANCH:-main}"
+APP_DIR="/opt/myapp/templates"
+
+case "${WIZ_ACTION:-install}" in
+  install)
+    git clone --branch "${BRANCH}" "${REPO}" "${APP_DIR}"
+    ;;
+  reconfigure|upgrade|refresh)
+    # All three re-sync from upstream; refresh is the most common in practice
+    # because the repo itself updates without a version bump in components.yaml.
+    cd "${APP_DIR}"
+    git fetch origin "${BRANCH}"
+    git reset --hard "origin/${BRANCH}"
+    ;;
+esac
+
+# Apply whatever the repo contains, every time.
+cd "${APP_DIR}"
+./apply.sh
+```
+
+**Difference between refresh and reconfigure**: `reconfigure` implies "the operator changed a config value". `refresh` implies "the operator wants this step to run again to catch up with external state". They're often treated identically by scripts, but the action name tells you *why* the script was invoked.
+
+### The install escape hatch
+
+**The `install` action is the only action where data destruction is appropriate.** On a reinstall after uninstall, operators expect fresh state. On a first install, there's nothing to preserve. The authentik component in [`080`](https://github.com/ChistokhinSV/stackwiz/tree/main/../080.consul_vault_authentik/install/authentik.sh) uses this to wipe a stale postgres volume only on `WIZ_ACTION=install`:
 
 ```bash
 # Scoped to the install path only — never touches data on reconfigure/upgrade.

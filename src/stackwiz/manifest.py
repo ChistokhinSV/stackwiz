@@ -54,6 +54,7 @@ class Component(BaseModel):
     version: str = "0.0.0"
     required: bool = False
     default: bool = True
+    repeatable: bool = False
     group: str = "default"
     depends: list[str] = Field(default_factory=list)
     install: Path

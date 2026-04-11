@@ -47,6 +47,7 @@ async def _run(
     mode: str,
     config_env_file: Path | None,
     selected_override: set[str] | None = None,
+    forced_refresh: set[str] | None = None,
 ) -> int:
     state = State(state_dir)
     executor = Executor(manifest_dir=manifest_dir)
@@ -102,9 +103,11 @@ async def _run(
                 c.id for c in manifest.components if c.required or c.default
             }
         print(f"[auto] selected: {', '.join(sorted(selected))}")
+        if forced_refresh:
+            print(f"[auto] forced refresh: {', '.join(sorted(forced_refresh))}")
         print(f"[auto] config: {config_values}")
         print("[auto] starting install")
-        failed = await _drive(engine.install(selected, config_values))
+        failed = await _drive(engine.install(selected, config_values, forced_refresh))
     else:
         if selected_override is not None:
             selected = set(selected_override)
@@ -163,9 +166,13 @@ def run_headless(
     mode: str = "install",
     config_env_file: Path | None = None,
     selected_override: set[str] | None = None,
+    forced_refresh: set[str] | None = None,
 ) -> int:
     state_dir.mkdir(parents=True, exist_ok=True)
     log_module.configure(state_dir, mode=f"headless:{mode}")
     return asyncio.run(
-        _run(manifest, state_dir, manifest_dir, mode, config_env_file, selected_override)
+        _run(
+            manifest, state_dir, manifest_dir, mode, config_env_file,
+            selected_override, forced_refresh,
+        )
     )

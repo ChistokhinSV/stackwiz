@@ -23,6 +23,7 @@ class Action(StrEnum):
     INSTALL = "install"          # not present in state
     UPGRADE = "upgrade"          # version differs
     RECONFIGURE = "reconfigure"  # version same, config hash differs
+    REFRESH = "refresh"          # idempotent re-run (repeatable component or --force)
     NOOP = "noop"                # nothing to do
     UNINSTALL = "uninstall"      # teardown
 
@@ -133,8 +134,17 @@ class State:
         manifest: Manifest,
         selected_ids: set[str],
         config_values: dict[str, Any],
+        forced_refresh: set[str] | None = None,
     ) -> dict[str, Action]:
-        """Decide the per-component action for an install-mode run."""
+        """Decide the per-component action for an install-mode run.
+
+        `forced_refresh` is a set of component ids that should run with
+        `Action.REFRESH` even when their version + config-hash haven't
+        changed. Used by `wizinstall refresh` to force re-execution.
+        Components with `repeatable: true` in the manifest are treated
+        as if they were always in `forced_refresh`.
+        """
+        forced = set(forced_refresh or ())
         actions: dict[str, Action] = {}
         for component in manifest.topo_order():
             if component.id not in selected_ids:
@@ -148,6 +158,8 @@ class State:
                 actions[component.id] = Action.UPGRADE
             elif installed.config_hash != cfg_hash:
                 actions[component.id] = Action.RECONFIGURE
+            elif component.id in forced or component.repeatable:
+                actions[component.id] = Action.REFRESH
             else:
                 actions[component.id] = Action.NOOP
         return actions

@@ -194,6 +194,10 @@ wizinstall run                      # interactive TUI install (default)
 wizinstall run --auto               # headless install, no TUI
 wizinstall run consul vault         # install only these two (by id, dependency order preserved)
 wizinstall run 3 4                  # install only components 3 and 4 (by index from `list`)
+wizinstall run --force              # force re-run all required+default components (Action.REFRESH)
+wizinstall run --force provision    # force re-run one component even if nothing changed
+wizinstall refresh                  # re-run everything installed with Action.REFRESH
+wizinstall refresh provision        # re-run one installed component with Action.REFRESH
 wizinstall uninstall                # TUI teardown (reverse topological order)
 wizinstall uninstall --auto         # headless teardown
 wizinstall uninstall nginx          # remove a single component
@@ -206,6 +210,8 @@ wizinstall info --format {text|markdown|json}
 ```
 
 `run` and `uninstall` accept component ids *or* 1-based indices as positional args — same UX as 061's `./deploy.sh 19 20`. Selective mode does not auto-include dependencies; you're responsible for running prerequisites first (topological order *within* the selection is preserved).
+
+`refresh` and `run --force` are for **repeatable steps** — git-synced provisioning, helm upgrades, template re-rendering, anything where "run this again" is a legitimate operator request. The target components run with `WIZ_ACTION=refresh` and `WIZ_REFRESH=1` set. Mark naturally-repeatable components with `repeatable: true` in the manifest so plain `wizinstall run` picks them up automatically. See [`docs/CONSUMER.md → Repeatable components`](docs/CONSUMER.md#repeatable-components--wizinstall-refresh) for the full pattern.
 
 `wizinstall info` also atomically refreshes `/state/summary.md` on every call, and the engine writes it at the end of every successful install run. Read it with `sudo cat /var/lib/stackwiz/summary.md` — no need to re-enter the container.
 

@@ -79,6 +79,7 @@ class Engine:
         self,
         selected_ids: set[str],
         config_values: dict[str, Any],
+        forced_refresh: set[str] | None = None,
     ) -> AsyncIterator[StepEvent]:
         """Run the install plan. Yields StepEvents in real time.
 
@@ -86,10 +87,15 @@ class Engine:
         but are installed as manifest components, the engine re-probes and
         builds clients after each such component completes. Secrets are
         materialized the moment Vault becomes available.
+
+        `forced_refresh` is a set of ids to run with Action.REFRESH regardless
+        of the config-hash diff. Used by `wizinstall refresh`.
         """
         self._stage_host_helpers()
         self.state.save_config(config_values)
-        actions = self.state.plan_actions(self.manifest, selected_ids, config_values)
+        actions = self.state.plan_actions(
+            self.manifest, selected_ids, config_values, forced_refresh
+        )
         prefix = self.manifest.consul.service_prefix
         materialized: dict[str, MaterializedSecret] = {}
         if self.vault is not None:
@@ -348,6 +354,8 @@ class Engine:
                 env["WIZ_OLD_VERSION"] = installed.version
         if action is Action.RECONFIGURE:
             env["WIZ_RECONFIGURE"] = "1"
+        if action is Action.REFRESH:
+            env["WIZ_REFRESH"] = "1"
 
         if self.consul is not None:
             for discover in component.consul_discover:

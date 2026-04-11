@@ -79,6 +79,7 @@ class ProgressScreen(Screen):
                 iterator = engine.install(
                     self.installer.selected_component_ids,
                     self.installer.config_values,
+                    forced_refresh=self.installer.forced_refresh or None,
                 )
             async for event in iterator:
                 self._apply_event(table, log_widget, event)
