@@ -161,16 +161,24 @@ Host VM (Ubuntu/Debian)
 
 ## CLI
 
-```
-wizinstall [OPTIONS]
+`wizinstall` is a subcommand group. Every subcommand accepts `--manifest`, `--state`, and (for `run`/`uninstall`) `--auto` for headless operation.
 
-  --manifest PATH     components.yaml [default: /manifest/components.yaml]
-  --state PATH        state dir [default: /state]
-  --uninstall         reverse teardown
-  --validate          validate manifest and exit
-  -V, --version
-  -h, --help
 ```
+wizinstall run                      # interactive TUI install (default)
+wizinstall run --auto               # headless install, no TUI
+wizinstall uninstall                # TUI teardown (reverse topological order)
+wizinstall uninstall --auto         # headless teardown
+wizinstall validate                 # parse the manifest, print the install order, exit
+wizinstall info                     # show installed components + URLs + masked secret paths
+wizinstall info --show-secrets      # unmask Vault values
+wizinstall info --format {text|markdown|json}
+```
+
+`wizinstall info` also atomically refreshes `/state/summary.md` on every call, and the engine writes it at the end of every successful install run. Read it with `sudo cat /var/lib/stackwiz/summary.md` — no need to re-enter the container.
+
+## Writing a new consumer
+
+See [docs/CONSUMER.md](docs/CONSUMER.md) for the full reference (manifest schema, install-script env contract, TLS helper usage, templates, bootstrap.sh template, CI/CD, uninstall contract, gotchas). A complete worked example lives at [`080.consul_vault_authentik`](https://github.com/ChistokhinSV/stackwiz/tree/main/../080.consul_vault_authentik).
 
 ## Developing locally
 
