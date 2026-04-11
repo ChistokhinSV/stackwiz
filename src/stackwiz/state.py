@@ -88,12 +88,13 @@ class State:
         component: Component,
         config_hash: str,
     ) -> None:
+        svc_names = [s.name for s in component.all_consul_services()]
         entry = InstalledComponent(
             id=component.id,
             version=component.version,
             config_hash=config_hash,
             installed_at=datetime.now(UTC).isoformat(timespec="seconds"),
-            consul_service=component.consul_service.name if component.consul_service else None,
+            consul_service=",".join(svc_names) if svc_names else None,
         )
         self._installed[component.id] = entry
         self._save_installed()

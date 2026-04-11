@@ -60,7 +60,11 @@ class Component(BaseModel):
     uninstall: Path | None = None
     upgrade: Path | None = None
     verify: str | None = None
+    # Either `consul_service` (singular) for one service, OR `consul_services`
+    # (plural) for components that register multiple endpoints (e.g. authentik
+    # exposing both HTTP and LDAPS). Mutually exclusive.
     consul_service: ConsulService | None = None
+    consul_services: list[ConsulService] = Field(default_factory=list)
     consul_discover: list[ConsulDiscover] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
 
@@ -70,6 +74,23 @@ class Component(BaseModel):
         if not v or not all(c.isalnum() or c in "-_" for c in v):
             raise ValueError(f"component id must be alphanumeric/-/_: {v!r}")
         return v
+
+    @model_validator(mode="after")
+    def _service_exclusivity(self) -> Component:
+        if self.consul_service is not None and self.consul_services:
+            raise ValueError(
+                f"component {self.id!r}: use either consul_service or "
+                f"consul_services, not both"
+            )
+        return self
+
+    def all_consul_services(self) -> list[ConsulService]:
+        """Unified view — callers iterate this instead of the two fields."""
+        if self.consul_services:
+            return list(self.consul_services)
+        if self.consul_service is not None:
+            return [self.consul_service]
+        return []
 
 
 class ConfigField(BaseModel):

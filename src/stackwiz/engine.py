@@ -140,13 +140,16 @@ class Engine:
                         except Exception as exc:  # noqa: BLE001
                             log.warning("secret materialization failed: %s", exc)
 
-            if self.consul is not None and component.consul_service is not None:
-                try:
-                    self.consul.register_service(component)
-                    log.info("%s: registered in consul as %s",
-                             component.id, component.consul_service.name)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("%s: consul register failed: %s", component.id, exc)
+            services = component.all_consul_services()
+            if self.consul is not None:
+                for svc in services:
+                    try:
+                        self.consul.register_service(component, svc)
+                        log.info("%s: registered in consul as %s",
+                                 component.id, svc.name)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("%s: consul register %s failed: %s",
+                                    component.id, svc.name, exc)
 
             if self.consul is not None:
                 for key, value in self._kv_payload(config_values, component).items():
@@ -155,7 +158,7 @@ class Engine:
                     except Exception as exc:  # noqa: BLE001
                         log.warning("%s: consul KV put %s failed: %s", component.id, key, exc)
 
-            if self.vault is not None and component.consul_service is not None:
+            if self.vault is not None and services:
                 try:
                     self.vault.apply_service_policy(prefix, component.id)
                 except Exception as exc:  # noqa: BLE001
@@ -170,6 +173,15 @@ class Engine:
             "install finished: %d ok, %d failed, %d skipped",
             len(result.succeeded), len(result.failed), len(result.skipped),
         )
+
+        # Write summary.md at end of successful install
+        if not result.failed:
+            try:
+                from stackwiz.info import write_summary_md
+                write_summary_md(self.manifest, self.state, self.consul, self.vault)
+                log.info("summary written to %s/summary.md", self.state.state_dir)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("summary.md write failed: %s", exc)
 
     # --- uninstall --------------------------------------------------------------
 

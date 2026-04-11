@@ -43,9 +43,10 @@ class ConsulClient:
     def register_service(
         self,
         component: Component,
+        service: ConsulService | None = None,
         node_address: str = "127.0.0.1",
     ) -> None:
-        svc = component.consul_service
+        svc = service or component.consul_service
         if svc is None:
             return
         check = None
@@ -72,14 +73,19 @@ class ConsulClient:
             check=check,
         )
 
-    def deregister_service(self, component: Component) -> None:
-        svc = component.consul_service
-        if svc is None:
-            return
-        try:
-            self._client.agent.service.deregister(f"{svc.name}-{component.id}")
-        except Exception:  # noqa: BLE001 — idempotent teardown
-            pass
+    def deregister_service(
+        self,
+        component: Component,
+        service: ConsulService | None = None,
+    ) -> None:
+        candidates = (
+            [service] if service is not None else component.all_consul_services()
+        )
+        for svc in candidates:
+            try:
+                self._client.agent.service.deregister(f"{svc.name}-{component.id}")
+            except Exception:  # noqa: BLE001 — idempotent teardown
+                pass
 
     def discover(self, service: ConsulService | str) -> CatalogEntry | None:
         name = service.name if isinstance(service, ConsulService) else service
