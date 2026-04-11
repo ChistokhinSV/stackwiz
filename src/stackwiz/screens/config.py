@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Select, Static
 
@@ -27,27 +27,26 @@ class ConfigScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with VerticalScroll():
-            with Vertical(id="config-box"):
-                yield Label("[b]Configuration[/b]")
-                yield Static(
-                    "Priority: previously-saved state > .stackwiz.env > "
-                    "manifest defaults. Saved to /state/config.yaml on Next."
+        with VerticalScroll(id="main"):
+            yield Label("[b]Configuration[/b]")
+            yield Static(
+                "Priority: .stackwiz.env > saved state > manifest defaults. "
+                "Values are saved to /state/config.yaml on Next."
+            )
+            existing = self._initial_values()
+            for field in self.installer.manifest.config:
+                default = existing.get(field.id, field.default)
+                yield Label(
+                    f"{field.label}"
+                    + (" [red]*[/red]" if field.required else "")
                 )
-                existing = self._initial_values()
-                for field in self.installer.manifest.config:
-                    default = existing.get(field.id, field.default)
-                    yield Label(
-                        f"{field.label}"
-                        + (" [red]*[/red]" if field.required else "")
-                    )
-                    if field.help:
-                        yield Static(f"[dim]{field.help}[/dim]")
-                    yield self._build_widget(field, default)
-                yield Static("", id="config-hint")
-                with Horizontal():
-                    yield Button("Back", id="back")
-                    yield Button("Next", id="next", variant="primary")
+                if field.help:
+                    yield Static(f"[dim]{field.help}[/dim]")
+                yield self._build_widget(field, default)
+            yield Static("", id="config-hint")
+        with Horizontal(id="button-bar"):
+            yield Button("Back", id="back")
+            yield Button("Next", id="next", variant="primary")
         yield Footer()
 
     def _initial_values(self) -> dict[str, Any]:

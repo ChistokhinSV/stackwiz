@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Label, Static
 
@@ -25,39 +25,37 @@ class SummaryScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with VerticalScroll():
-            with Vertical(id="summary-box"):
-                status = (
-                    "[red]COMPLETED WITH ERRORS[/red]"
-                    if self.failed
-                    else "[green]SUCCESS[/green]"
-                )
-                yield Label(f"[b]{status}[/b]")
-                yield Static(f"Manifest: {self.installer.manifest.display_name} "
-                             f"v{self.installer.manifest.version}")
-                yield Static(f"Log: {self.installer.state_dir}/install.log")
+        with VerticalScroll(id="main"):
+            status = (
+                "[red]COMPLETED WITH ERRORS[/red]"
+                if self.failed
+                else "[green]SUCCESS[/green]"
+            )
+            yield Label(f"[b]{status}[/b]")
+            yield Static(f"Manifest: {self.installer.manifest.display_name} "
+                         f"v{self.installer.manifest.version}")
+            yield Static(f"Log: {self.installer.state_dir}/install.log")
+            yield Static("")
+
+            yield Label("[b]Installed components[/b]")
+            table = DataTable(id="installed-table", cursor_type="row")
+            yield table
+
+            secrets = getattr(self.installer, "materialized_secrets", {})
+            if secrets:
                 yield Static("")
-
-                yield Label("[b]Installed components[/b]")
-                table = DataTable(id="installed-table", cursor_type="row")
-                yield table
-
-                secrets = getattr(self.installer, "materialized_secrets", {})
-                if secrets:
-                    yield Static("")
-                    yield Label("[b]Secrets[/b] (stored in Vault)")
-                    for sid, info in secrets.items():
-                        marker = (
-                            "[yellow]new[/yellow]"
-                            if info.regenerated
-                            else "[dim]existing[/dim]"
-                        )
-                        yield Static(
-                            f"  {sid}: vault kv get {info.vault_path}  {marker}"
-                        )
-
-                with Horizontal():
-                    yield Button("Quit", id="quit", variant="primary")
+                yield Label("[b]Secrets[/b] (stored in Vault)")
+                for sid, info in secrets.items():
+                    marker = (
+                        "[yellow]new[/yellow]"
+                        if info.regenerated
+                        else "[dim]existing[/dim]"
+                    )
+                    yield Static(
+                        f"  {sid}: vault kv get {info.vault_path}  {marker}"
+                    )
+        with Horizontal(id="button-bar"):
+            yield Button("Quit", id="quit", variant="primary")
         yield Footer()
 
     def on_mount(self) -> None:

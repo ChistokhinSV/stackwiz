@@ -23,11 +23,36 @@ class InstallerApp(App[int]):
     TITLE = "stackwiz"
     SUB_TITLE = "modular installer"
     CSS = """
-    Screen { align: center top; }
-    #welcome-box, #components-box, #config-box, #summary-box { padding: 1 2; width: 100%; }
-    #progress-table { height: 40%; min-height: 8; }
-    #progress-log { height: 1fr; min-height: 6; background: $surface; }
-    Button { margin: 1 1; }
+    /* Every screen uses the same layout:
+         Header  (sticky top, 1 row)
+         VerticalScroll#main  (fills remaining space, scrolls when overflow)
+         Horizontal#button-bar (sticky bottom via dock, 3 rows)
+         Footer  (sticky bottom, 1 row)
+       So no matter how small the terminal window is, the button bar and
+       footer stay visible and the main content scrolls. */
+    Screen { layout: vertical; }
+
+    VerticalScroll#main {
+        height: 1fr;
+        padding: 1 2;
+        scrollbar-size: 1 1;
+    }
+
+    #button-bar {
+        dock: bottom;
+        height: 3;
+        align: center middle;
+        background: $panel;
+        padding: 0 1;
+    }
+
+    #button-bar Button { margin: 0 1; }
+
+    /* Progress screen overrides — the DataTable + RichLog both need bounded
+       heights so the RichLog gets the remaining space without pushing the
+       buttons off-screen. */
+    #progress-table { height: 40%; min-height: 6; }
+    #progress-log { height: 1fr; min-height: 4; background: $surface; }
     """
 
     def __init__(

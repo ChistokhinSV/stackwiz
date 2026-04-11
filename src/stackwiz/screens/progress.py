@@ -41,13 +41,13 @@ class ProgressScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical():
+        with Vertical(id="main"):
             yield Label("[b]Installing components[/b]", id="progress-title")
             yield DataTable(id="progress-table", cursor_type="row")
             yield RichLog(id="progress-log", highlight=False, markup=False, wrap=True)
-            with Horizontal():
-                yield Button("Next", id="next", variant="primary", disabled=True)
-                yield Button("Abort", id="abort", variant="error")
+        with Horizontal(id="button-bar"):
+            yield Button("Next", id="next", variant="primary", disabled=True)
+            yield Button("Abort", id="abort", variant="error")
         yield Footer()
 
     def on_mount(self) -> None:

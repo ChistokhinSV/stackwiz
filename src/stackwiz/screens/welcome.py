@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from textual import work
 from textual.app import ComposeResult
-from textual.containers import Center, Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Label, Static
 
@@ -33,26 +33,24 @@ class WelcomeScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with VerticalScroll():
-            with Vertical(id="welcome-box"):
-                yield Label(f"[b]{self.installer.manifest.display_name}[/b] "
-                            f"v{self.installer.manifest.version}", id="title")
-                yield Static(f"Mode: [cyan]{self.installer.mode}[/cyan]")
-                yield Static(f"Domain: [cyan]{self.installer.effective_domain}[/cyan]")
-                yield Static(
-                    f"Host: {platform.system()} {platform.release()} "
-                    f"({platform.machine()})"
-                )
-                yield Static("")
-                yield Label("[b]Service discovery[/b]")
-                yield Static("Probing Consul...", id="consul-line")
-                yield Static("Probing Vault...", id="vault-line")
-                yield Static("")
-                yield Static("", id="proceed-hint")
-                with Center():
-                    with Horizontal():
-                        yield Button("Next", id="next", variant="primary", disabled=True)
-                        yield Button("Quit", id="quit", variant="error")
+        with VerticalScroll(id="main"):
+            yield Label(f"[b]{self.installer.manifest.display_name}[/b] "
+                        f"v{self.installer.manifest.version}", id="title")
+            yield Static(f"Mode: [cyan]{self.installer.mode}[/cyan]")
+            yield Static(f"Domain: [cyan]{self.installer.effective_domain}[/cyan]")
+            yield Static(
+                f"Host: {platform.system()} {platform.release()} "
+                f"({platform.machine()})"
+            )
+            yield Static("")
+            yield Label("[b]Service discovery[/b]")
+            yield Static("Probing Consul...", id="consul-line")
+            yield Static("Probing Vault...", id="vault-line")
+            yield Static("")
+            yield Static("", id="proceed-hint")
+        with Horizontal(id="button-bar"):
+            yield Button("Next", id="next", variant="primary", disabled=True)
+            yield Button("Quit", id="quit", variant="error")
         yield Footer()
 
     def on_mount(self) -> None:

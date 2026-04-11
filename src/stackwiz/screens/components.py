@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Label, SelectionList, Static
 from textual.widgets.selection_list import Selection
@@ -26,7 +26,7 @@ class ComponentsScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="components-box"):
+        with VerticalScroll(id="main"):
             yield Label("[b]Select components[/b]")
             yield Static(
                 "Required components are pre-selected. Dependencies are "
@@ -34,9 +34,9 @@ class ComponentsScreen(Screen):
             )
             yield SelectionList[str](*self._build_selections(), id="component-list")
             yield Static("", id="components-hint")
-            with Horizontal():
-                yield Button("Back", id="back")
-                yield Button("Next", id="next", variant="primary")
+        with Horizontal(id="button-bar"):
+            yield Button("Back", id="back")
+            yield Button("Next", id="next", variant="primary")
         yield Footer()
 
     def _build_selections(self) -> list[Selection[str]]:
