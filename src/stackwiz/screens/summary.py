@@ -55,6 +55,7 @@ class SummaryScreen(Screen):
                         f"  {sid}: vault kv get {info.vault_path}  {marker}"
                     )
         with Horizontal(id="button-bar"):
+            yield Static("", id="bar-spacer")
             yield Button("Quit", id="quit", variant="primary")
         yield Footer()
 
