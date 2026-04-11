@@ -36,7 +36,6 @@ class ComponentsScreen(Screen):
             yield Static("", id="components-hint")
         with Horizontal(id="button-bar"):
             yield Button("Back", id="back")
-            yield Static("", id="bar-spacer")
             yield Button("Next", id="next", variant="primary")
         yield Footer()
 

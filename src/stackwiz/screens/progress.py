@@ -7,7 +7,7 @@ from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Header, Label, RichLog, Static
+from textual.widgets import Button, DataTable, Footer, Header, Label, RichLog
 
 from stackwiz.engine import Engine, Status, StepEvent
 from stackwiz.executor import Executor
@@ -47,7 +47,6 @@ class ProgressScreen(Screen):
             yield RichLog(id="progress-log", highlight=False, markup=False, wrap=True)
         with Horizontal(id="button-bar"):
             yield Button("Abort", id="abort", variant="error")
-            yield Static("", id="bar-spacer")
             yield Button("Next", id="next", variant="primary", disabled=True)
         yield Footer()
 

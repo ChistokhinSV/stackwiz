@@ -46,7 +46,6 @@ class ConfigScreen(Screen):
             yield Static("", id="config-hint")
         with Horizontal(id="button-bar"):
             yield Button("Back", id="back")
-            yield Static("", id="bar-spacer")
             yield Button("Next", id="next", variant="primary")
         yield Footer()
 

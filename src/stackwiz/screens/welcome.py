@@ -50,7 +50,6 @@ class WelcomeScreen(Screen):
             yield Static("", id="proceed-hint")
         with Horizontal(id="button-bar"):
             yield Button("Quit", id="quit", variant="error")
-            yield Static("", id="bar-spacer")
             yield Button("Next", id="next", variant="primary", disabled=True)
         yield Footer()
 

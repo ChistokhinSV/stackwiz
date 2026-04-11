@@ -50,13 +50,9 @@ class InstallerApp(App[int]):
         padding: 0 2;
     }
 
+    /* Buttons sit next to each other, centered as a group. Compose order
+       is preserved: cancel/back first, primary Next second. */
     #button-bar Button { margin: 0 1; }
-
-    /* Flex spacer between the left-aligned cancel/back button and the
-       right-aligned primary (next) button. Every screen's compose() puts
-       a Static with id="bar-spacer" between them so they split across
-       the width of the bar. */
-    #button-bar #bar-spacer { width: 1fr; }
 
     /* Progress screen overrides — the DataTable + RichLog both need bounded
        heights so the RichLog gets the remaining space without pushing the
