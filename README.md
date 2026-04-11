@@ -2,7 +2,7 @@
 
 A reusable installer framework that reads a per-project `components.yaml` manifest, drives an interactive Textual TUI wizard, runs install scripts on the host, and stores service metadata in Consul + secrets in HashiCorp Vault.
 
-- **One image**, many projects. Each consumer repo ships a tiny `bootstrap.sh` that pulls `ghcr.io/chistokhin/stackwiz:latest`.
+- **One image**, many projects. Each consumer repo ships a tiny `bootstrap.sh` that pulls `ghcr.io/chistokhinsv/stackwiz:latest`.
 - **No Python on the host.** The installer runs entirely inside a container; bash scripts are run on the host via `nsenter`.
 - **Declarative components**. YAML manifest lists the components, their dependencies, their versions, their Consul service definitions, and what secrets they need.
 - **Service discovery built in**. Consul + Vault are found at `consul.<domain>` / `vault.<domain>` via DNS, with environment overrides and a local-fallback probe.
@@ -111,7 +111,7 @@ set -euo pipefail
 command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
 
 sudo mkdir -p /var/lib/stackwiz
-sudo docker pull ghcr.io/chistokhin/stackwiz:latest
+sudo docker pull ghcr.io/chistokhinsv/stackwiz:latest
 sudo docker run --rm -it \
   --privileged --pid=host --network=host \
   -v "$PWD:/manifest:ro" \
@@ -119,7 +119,7 @@ sudo docker run --rm -it \
   -e CONSUL_HTTP_ADDR="${CONSUL_HTTP_ADDR:-}" \
   -e VAULT_ADDR="${VAULT_ADDR:-}" \
   -e VAULT_TOKEN="${VAULT_TOKEN:-}" \
-  ghcr.io/chistokhin/stackwiz:latest "$@"
+  ghcr.io/chistokhinsv/stackwiz:latest "$@"
 ```
 
 Then on the target Ubuntu/Debian VM:
