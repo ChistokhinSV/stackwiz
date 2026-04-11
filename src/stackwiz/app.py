@@ -24,12 +24,17 @@ class InstallerApp(App[int]):
     SUB_TITLE = "modular installer"
     CSS = """
     /* Every screen uses the same layout:
-         Header  (sticky top, 1 row)
-         VerticalScroll#main  (fills remaining space, scrolls when overflow)
-         Horizontal#button-bar (sticky bottom via dock, 3 rows)
-         Footer  (sticky bottom, 1 row)
-       So no matter how small the terminal window is, the button bar and
-       footer stay visible and the main content scrolls. */
+         Header       (dock: top by widget default, 1 row)
+         VerticalScroll#main  (height: 1fr — fills remaining space, scrolls)
+         Horizontal#button-bar (height: 3 — flex-stacked above Footer)
+         Footer       (dock: bottom by widget default, 1 row)
+
+       Header and Footer are auto-docked by their widget classes. Because
+       Screen { layout: vertical }, the two non-docked children (#main and
+       #button-bar) share the remaining space: #main takes 1fr, #button-bar
+       takes exactly 3 rows, and Textual slots them between the docked
+       Header and Footer without overlap. Button bar stays visible even
+       when the terminal is very small — #main just scrolls. */
     Screen { layout: vertical; }
 
     VerticalScroll#main {
@@ -39,11 +44,9 @@ class InstallerApp(App[int]):
     }
 
     #button-bar {
-        dock: bottom;
         height: 3;
         align: center middle;
         background: $panel;
-        padding: 0 1;
     }
 
     #button-bar Button { margin: 0 1; }
