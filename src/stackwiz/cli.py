@@ -250,7 +250,7 @@ def init_env(
 
     from stackwiz.config_overrides import effective_config
     existing = _try_read_existing(target)
-    values, domain = effective_config(manifest, existing, None)
+    resolved, domain = effective_config(manifest, existing, None)
 
     header = (
         f"# stackwiz consumer config overrides for "
@@ -259,17 +259,22 @@ def init_env(
     lines: list[str] = []
     lines.append(header)
     lines.append("#")
-    lines.append("# Edit values below. Placeholders like ${domain} are resolved at load time,")
-    lines.append("# so changing `domain:` cascades through any field that references it.")
+    lines.append("# EDIT ONLY WHAT YOU NEED TO OVERRIDE.")
+    lines.append("# Fields below are commented out — uncomment to override the manifest default.")
+    lines.append("# Change `domain:` and every ${domain}-derived field auto-updates at run time.")
     lines.append("# Precedence (highest wins):")
     lines.append("#   <state_dir>/config.yaml > this file > manifest `default:` fields")
     lines.append("")
     lines.append("# ---- Deployment domain ----")
     lines.append("# Drives Consul/Vault service discovery (consul.<domain> / vault.<domain>)")
-    lines.append("# and is referenced via ${domain} by other fields below.")
-    lines.append(f'domain: "{domain}"')
+    lines.append("# and is referenced via ${domain} by other fields in the manifest.")
+    lines.append(_yaml_line("domain", domain))
     lines.append("")
     lines.append("# ---- Component configuration ----")
+    lines.append("# Values shown in comments are what the current `domain:` resolves to —")
+    lines.append("# they're HINTS, not defaults baked into this file. Uncomment a line to")
+    lines.append("# force that specific value regardless of the cascade.")
+    lines.append("")
     for field in manifest.config:
         if field.help:
             lines.append(f"# {field.label}: {field.help}")
@@ -279,8 +284,15 @@ def init_env(
             lines.append(f"#   choices: {', '.join(field.choices)}")
         if field.required:
             lines.append("#   required")
-        val = values.get(field.id, field.default)
-        lines.append(_yaml_line(field.id, val))
+        val = resolved.get(field.id, field.default)
+        yaml_line = _yaml_line(field.id, val)
+        # If the user explicitly set this field in the current .stackwiz.env,
+        # preserve it as an uncommented override. Otherwise emit a commented
+        # hint so the cascade stays in effect.
+        if field.id in existing and field.id != "domain":
+            lines.append(yaml_line)
+        else:
+            lines.append(f"# {yaml_line}")
         lines.append("")
 
     target.parent.mkdir(parents=True, exist_ok=True)

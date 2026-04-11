@@ -1,23 +1,27 @@
 """Compute effective config values with ${var} substitution.
 
 Priority, highest wins:
-    1. <state_dir>/config.yaml (saved from the last successful run)
-    2. <manifest_dir>/.stackwiz.env (operator pre-seed)
+    1. <manifest_dir>/.stackwiz.env (operator pre-seed — git-tracked intent)
+    2. <state_dir>/config.yaml (cache of the last successful run's values)
     3. Manifest `default:` fields
 
-After merging, every string value (both the manifest's top-level `domain:`
-and each `config:` field's effective value) is `${id}`-substituted against
-the merged map. That lets consumer manifests declare
+`.stackwiz.env` beats state because it's the explicit operator override for a
+specific deployment. Without this ordering, a prior install's cached
+`state/config.yaml` would clobber the `${domain}` cascade whenever the
+operator edits the env file post-install.
+
+After merging, every string value is `${id}`-substituted against the merged
+map. That lets consumer manifests declare
 
     domain: "stackwiz.lab"
     config:
       - id: authentik_hostname
         default: "auth.${domain}"
       - id: ldap_base_dn
-        default: "dc=${domain_slug},dc=local"
+        default: "${domain_dn}"       # synthetic: dc=stackwiz,dc=lab
 
 and have everything downstream update from a single `domain:` override in
-`.stackwiz.env` or the TUI config screen.
+`.stackwiz.env`.
 """
 from __future__ import annotations
 
@@ -92,16 +96,29 @@ def effective_config(
       - `${domain_dn}`   — domain rendered as LDAP base DN (`dc=a,dc=b`)
     """
     merged: dict[str, Any] = {"domain": manifest.domain}
+    template_fields: set[str] = set()
     for field in manifest.config:
         if field.default is not None:
             merged[field.id] = field.default
+            if isinstance(field.default, str) and "${" in field.default:
+                template_fields.add(field.id)
 
-    env_overrides = _load_env_file(env_file)
-    for key, val in env_overrides.items():
-        if key == "domain" or key in {f.id for f in manifest.config}:
+    # Apply state cache, but SKIP any field whose manifest default is a
+    # template (contains `${...}`). State stores fully-resolved values from
+    # prior runs, so a cached `authentik_hostname: auth.stackwiz.lab` would
+    # otherwise clobber the `auth.${domain}` template and break the cascade
+    # when the operator changes `domain` in `.stackwiz.env`.
+    for key, val in state_config.items():
+        if key == "domain":
+            merged[key] = val
+        elif key in {f.id for f in manifest.config} and key not in template_fields:
             merged[key] = val
 
-    for key, val in state_config.items():
+    # `.stackwiz.env` overrides everything — this is explicit operator intent
+    # and wins over both state cache and manifest defaults. Templated fields
+    # can still be overridden here (uncommented line in the env file).
+    env_overrides = _load_env_file(env_file)
+    for key, val in env_overrides.items():
         if key == "domain" or key in {f.id for f in manifest.config}:
             merged[key] = val
 
