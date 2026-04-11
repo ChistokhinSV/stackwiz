@@ -437,25 +437,88 @@ secrets:
 
 ## Idempotency guidelines
 
-**stackwiz runs your scripts again on every `run`.** Even though the engine skips components whose version + config-hash haven't changed (status: `noop`), you should still write scripts that survive being invoked multiple times against an already-configured host. This matters because:
+**stackwiz runs your scripts again on every `run`.** Scripts MUST be idempotent — re-running them against a host that's already in the desired state should be a no-op (or a fast config reload), never break anything, and never lose user data. This is a hard requirement, not a nice-to-have, because:
 
 - Operators re-run `wizinstall run` to apply config changes — that re-runs the script with `WIZ_RECONFIGURE=1`
 - Selective installs (`wizinstall run consul`) may run a script whose target is already present
 - Upgrades run the same `install/<id>.sh` with `WIZ_UPGRADE=1` and `WIZ_OLD_VERSION=<previous>`
 - Partial failures need to be recoverable — just re-run after fixing the underlying issue
+- CI / automation expects the same manifest applied repeatedly to converge to the same state
 
-### The five rules
+### What "safe to re-run" actually means
 
-1. **Check before you mutate.** `useradd`, `install -d`, `mkdir -p`, `cat > file`, `systemctl enable` are idempotent. `useradd` on an existing user fails — guard with `id -u <user> >/dev/null 2>&1 || useradd ...`.
-2. **`set -euo pipefail` + explicit `|| true`** on expected-to-fail commands. `grep`, `test`, and conditional operations in pipelines will kill the script via pipefail.
-3. **Use `install -o user -g group -m mode`** instead of `cp` + `chown` + `chmod` — it's atomic and idempotent.
-4. **`systemctl restart` over `start`** — restart is safe on an inactive unit (becomes a start); start is a no-op on an active unit. `systemctl enable --now` is similarly safe.
-5. **Branch on `WIZ_ACTION` when the upgrade path differs.** A version bump might need a data migration; a reconfigure might just need a reload. Example:
+The engine pre-filters re-runs via version + config-hash diffs. Your script only sees four possible `WIZ_ACTION` values, and each has a different contract:
+
+| Action | When | Your script MAY… | Your script MUST NOT… |
+|---|---|---|---|
+| **(not run)** | `noop` — version + config unchanged | *script isn't invoked at all* | — |
+| `install` | Component not in `/state/installed.yaml` (first run, post-uninstall, or operator removed the entry) | wipe stale data from prior failed attempts, re-create users/dirs, re-initialize databases | destroy data that the operator explicitly didn't ask to be re-initialized (e.g. don't wipe user-uploaded files) |
+| `reconfigure` | Version unchanged, config-hash changed | overwrite config files, reload services, re-render blueprints | drop databases, regenerate secrets, erase volumes, force a full restart unless strictly necessary |
+| `upgrade` | Version differs from `installed.yaml` | run version-specific migrations, pull new images, rewrite binaries | assume the old version's data schema is compatible without inspection |
+
+**The `install` action is the escape hatch for fresh state.** It's the only action where data destruction is appropriate. On a reinstall after uninstall, operators expect fresh state. On a first install, there's nothing to preserve. The authentik component in [`080`](https://github.com/ChistokhinSV/stackwiz/tree/main/../080.consul_vault_authentik/install/authentik.sh) uses this to wipe a stale postgres volume only on `WIZ_ACTION=install`:
+
+```bash
+# Scoped to the install path only — never touches data on reconfigure/upgrade.
+if [ "${WIZ_ACTION:-install}" = "install" ] && \
+   docker volume inspect authentik_postgres-data >/dev/null 2>&1; then
+  (cd "${APP_DIR}" && docker compose down -v 2>&1 | tail -5) || true
+  docker volume rm -f authentik_postgres-data authentik_redis-data 2>&1 || true
+fi
+```
+
+Safe because (a) all the authentik secrets are `immutable:`, so a fresh database always initializes with the same credentials that prior runs used, and (b) the state file is the source of truth — if `installed.yaml` doesn't have this component, no user expects the existing volume to be preserved.
+
+### Verifying idempotency before you ship
+
+Every consumer repo should exercise these four scenarios on a clean VM:
+
+```bash
+# 1. Fresh install → everything installs once
+./bootstrap.sh run --auto
+
+# 2. Re-run with no changes → everything NOOPs. Engine skips scripts entirely.
+./bootstrap.sh run --auto
+# Expected: every component "skipped: noop — up to date"
+
+# 3. Config change → scripts re-run with WIZ_RECONFIGURE=1, no data loss
+$EDITOR .stackwiz.env   # change a non-required field
+./bootstrap.sh run --auto
+# Expected: affected components "running: reconfigure — reconfigure"; user data preserved
+
+# 4. Force fresh install of one component → test data-wipe path
+sudo sed -i '/^  nginx:/,/^  [a-z]/{/^  nginx:/d;/^    /d}' /var/lib/stackwiz/installed.yaml
+./bootstrap.sh run --auto
+# Expected: nginx "running: install — install"; clean slate; depends-on-authentik not re-triggered
+```
+
+If any of those four break, the script isn't idempotent yet. The `docker volume rm -f` pattern + `docker compose up -d` handles most compose-based services; `systemctl restart --no-block` + HTTP poll handles most systemd services.
+
+### The six rules
+
+1. **Config files + systemd units are rewritten every time from heredocs.** Treat the script as the source of truth: `cat > /etc/mysvc/config.hcl <<EOF ... EOF` always overwrites. This means changing a config value means changing the manifest or script, not hand-editing the file on the host.
+2. **Check before you mutate anything that's not a heredoc overwrite.** `useradd`, `mkdir`, `docker volume create` all error on existing targets. Guard with `id -u <user> >/dev/null 2>&1 || useradd …` or use idempotent variants (`install -d`, `docker volume rm -f`).
+3. **`set -euo pipefail` + explicit `|| true`** on expected-to-fail commands. `grep` returning 1 on no-match will kill a pipeline via pipefail unless you suffix `|| true`.
+4. **Use `install -o user -g group -m mode`** instead of `cp` + `chown` + `chmod` — atomic, idempotent, and one syscall instead of three.
+5. **`systemctl restart --no-block` + HTTP poll** for health checks. Restart is safe on inactive units (becomes start). `--no-block` avoids `Type=notify` hangs. Poll an HTTP/TCP endpoint after, don't rely on systemd status.
+6. **Branch on `WIZ_ACTION` when the action contract differs.** Fresh-install data wipes belong behind `if [ "$WIZ_ACTION" = "install" ]`, version migrations behind `upgrade`, config reloads behind `reconfigure`. Example:
    ```bash
    case "${WIZ_ACTION:-install}" in
-     install)      echo "fresh install" ;;
-     upgrade)      echo "upgrading from ${WIZ_OLD_VERSION} to ${WIZ_COMPONENT_VERSION}"; migrate_data ;;
-     reconfigure)  echo "config changed, reloading"; systemctl reload myservice ;;
+     install)
+       # Scoped to the fresh-install path — safe to wipe stale failed-attempt state.
+       if docker volume inspect myapp-data >/dev/null 2>&1; then
+         docker compose down -v || true
+         docker volume rm -f myapp-data || true
+       fi
+       ;;
+     upgrade)
+       echo "upgrading from ${WIZ_OLD_VERSION} to ${WIZ_COMPONENT_VERSION}"
+       ./migrate.sh "${WIZ_OLD_VERSION}" "${WIZ_COMPONENT_VERSION}"
+       ;;
+     reconfigure)
+       echo "config changed, reloading without downtime"
+       systemctl reload myservice
+       ;;
    esac
    ```
 
@@ -504,9 +567,19 @@ Two reasons to use `--no-block`:
 - **Don't `rm -rf /opt/<app>` unconditionally at the top of install scripts** — that wipes user data on every re-run. Uninstall scripts clean up; install scripts bring forward.
 - **Don't hard-code `sleep N`** for "let it start up" — use a poll loop. Sleeps hide real slowness and fail under load.
 - **Don't initialize Vault / databases twice.** Guard with status checks (`vault status -format=json | jq -e '.initialized == false'`).
-- **Don't regenerate secrets on every run.** Use `immutable: true` in the manifest for anything paired with external state (admin passwords, signing keys).
+- **Don't regenerate secrets on every run.** Use `immutable: true` in the manifest for anything paired with external state (admin passwords, signing keys, database passwords).
 - **Don't write to `/tmp` without `mktemp`.** Cross-run collisions are a real issue.
 - **Don't rely on stdout ordering across `server` and `worker` containers** — docker compose starts them in parallel. Use healthchecks + `depends_on: condition: service_healthy`.
+- **Don't wipe data volumes outside the `WIZ_ACTION=install` branch.** A reconfigure run should never destroy databases. The authentik postgres wipe in 080 is scoped carefully — study that pattern.
+
+### Reference: 080's scripts as idempotency exemplars
+
+Every file under [`080/install/`](https://github.com/ChistokhinSV/stackwiz/tree/main/../080.consul_vault_authentik/install) has been verified idempotent via the four-scenario test above:
+
+- [`consul.sh`](https://github.com/ChistokhinSV/stackwiz/tree/main/../080.consul_vault_authentik/install/consul.sh) — binary version guard, config heredoc always rewritten, `systemctl restart --no-block` + leader-election poll. Data dir `/var/lib/consul` is never touched by the script, only by `consul.uninstall.sh`.
+- [`vault.sh`](https://github.com/ChistokhinSV/stackwiz/tree/main/../080.consul_vault_authentik/install/vault.sh) — captures `vault status` JSON once with `|| true`, guards init on `.initialized == false`, guards unseal on `.sealed == true`. Root token stored in `/state/vault-token` with `chmod 600` for re-adoption on re-runs.
+- [`authentik.sh`](https://github.com/ChistokhinSV/stackwiz/tree/main/../080.consul_vault_authentik/install/authentik.sh) — only example in 080 that needs the `WIZ_ACTION=install` branch (wipes stale postgres volume on fresh install). Blueprint rendering uses `envsubst` with a strict whitelist so YAML tags like `!Find` survive; the outpost-token fetch loop tolerates transient 404s from the authentik API during blueprint application.
+- [`nginx.sh`](https://github.com/ChistokhinSV/stackwiz/tree/main/../080.consul_vault_authentik/install/nginx.sh) — sources `stackwiz_tls_ensure` (which is itself idempotent via the 30-day `checkend` check) so re-runs reuse an existing cert. nginx config is rewritten + `nginx -t`-validated before `restart`.
 
 ### Idempotent install script skeleton
 
