@@ -64,8 +64,23 @@ class InstallerApp(App[int]):
         self.push_screen(WelcomeScreen())
 
     def build_clients_from_probes(self) -> None:
-        """Instantiate Consul + Vault clients from the welcome-screen probes."""
+        """Instantiate Consul + Vault clients from the welcome-screen probes.
+
+        For Vault, we also pick up the persisted token from <state_dir>/vault-token
+        when one exists (written by consumers' vault install scripts during the
+        initial self-bootstrap run). Without this, re-runs via the TUI fail with
+        403 on any Vault operation because `VaultClient(addr)` alone falls back
+        to the VAULT_TOKEN env var, which is typically empty on re-runs.
+        """
         if self.consul_probe and self.consul_probe.reachable and self.consul_probe.address:
             self.consul_client = ConsulClient(self.consul_probe.address)
         if self.vault_probe and self.vault_probe.reachable and self.vault_probe.address:
-            self.vault_client = VaultClient(self.vault_probe.address)
+            token_file = self.state_dir / "vault-token"
+            token = token_file.read_text().strip() if token_file.exists() else None
+            self.vault_client = VaultClient(self.vault_probe.address, token=token)
+            # Re-runs need the KV mount to exist (first run enables it lazily
+            # after vault installs; subsequent runs should re-ensure idempotently).
+            try:
+                self.vault_client.ensure_kv_mount()
+            except Exception:  # noqa: BLE001 — non-fatal; engine will log if it later fails
+                pass
