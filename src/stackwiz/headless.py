@@ -55,6 +55,7 @@ async def _run(
     manifest_dir: Path,
     mode: str,
     config_env_file: Path | None,
+    selected_override: set[str] | None = None,
 ) -> int:
     state = State(state_dir)
     executor = Executor(manifest_dir=manifest_dir)
@@ -98,16 +99,28 @@ async def _run(
     )
 
     if mode == "install":
-        selected = {
-            c.id for c in manifest.components if c.required or c.default
-        }
+        if selected_override is not None:
+            selected = set(selected_override)
+        else:
+            selected = {
+                c.id for c in manifest.components if c.required or c.default
+            }
         config_values = _load_config_values(manifest, state, config_env_file)
         print(f"[auto] selected: {', '.join(sorted(selected))}")
         print(f"[auto] config: {config_values}")
         print("[auto] starting install")
         failed = await _drive(engine.install(selected, config_values))
     else:
-        selected = set(state.installed().keys())
+        if selected_override is not None:
+            selected = set(selected_override)
+            # Drop anything the user asked for that was never installed.
+            installed_ids = set(state.installed().keys())
+            orphans = selected - installed_ids
+            if orphans:
+                print(f"[auto] note: not installed: {', '.join(sorted(orphans))}")
+            selected = selected & installed_ids
+        else:
+            selected = set(state.installed().keys())
         print(f"[auto] uninstalling: {', '.join(sorted(selected))}")
         failed = await _drive(engine.uninstall(selected))
 
@@ -154,7 +167,10 @@ def run_headless(
     manifest_dir: Path,
     mode: str = "install",
     config_env_file: Path | None = None,
+    selected_override: set[str] | None = None,
 ) -> int:
     state_dir.mkdir(parents=True, exist_ok=True)
     log_module.configure(state_dir)
-    return asyncio.run(_run(manifest, state_dir, manifest_dir, mode, config_env_file))
+    return asyncio.run(
+        _run(manifest, state_dir, manifest_dir, mode, config_env_file, selected_override)
+    )

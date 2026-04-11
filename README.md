@@ -166,13 +166,19 @@ Host VM (Ubuntu/Debian)
 ```
 wizinstall run                      # interactive TUI install (default)
 wizinstall run --auto               # headless install, no TUI
+wizinstall run consul vault         # install only these two (by id, dependency order preserved)
+wizinstall run 3 4                  # install only components 3 and 4 (by index from `list`)
 wizinstall uninstall                # TUI teardown (reverse topological order)
 wizinstall uninstall --auto         # headless teardown
+wizinstall uninstall nginx          # remove a single component
+wizinstall list                     # print install order with indices + current state
 wizinstall validate                 # parse the manifest, print the install order, exit
 wizinstall info                     # show installed components + URLs + masked secret paths
 wizinstall info --show-secrets      # unmask Vault values
 wizinstall info --format {text|markdown|json}
 ```
+
+`run` and `uninstall` accept component ids *or* 1-based indices as positional args — same UX as 061's `./deploy.sh 19 20`. Selective mode does not auto-include dependencies; you're responsible for running prerequisites first (topological order *within* the selection is preserved).
 
 `wizinstall info` also atomically refreshes `/state/summary.md` on every call, and the engine writes it at the end of every successful install run. Read it with `sudo cat /var/lib/stackwiz/summary.md` — no need to re-enter the container.
 

@@ -140,7 +140,7 @@ When the engine runs `install/<component>.sh`, it pipes the script content to `b
 | `STACKWIZ_STATE_DIR` | **host-side** state dir, e.g. `/var/lib/stackwiz` — scripts should use this for anything persistent |
 | env vars from `consul_discover:` mappings | looked up from Consul catalog before the script runs |
 
-Write your scripts **idempotently** — stackwiz re-runs them on every `run` (skipped via a config-hash diff, but still expect them to handle "already installed" cleanly).
+Write your scripts **idempotently** — stackwiz re-runs them on every `run` (skipped via a config-hash diff, but still expect them to handle "already installed" cleanly). See [Idempotency guidelines](#idempotency-guidelines) below.
 
 ### Example: minimal install script
 
@@ -259,7 +259,202 @@ Usage:
 ./bootstrap.sh validate         # validate manifest and exit
 ./bootstrap.sh info             # print what's installed
 ./bootstrap.sh info --show-secrets --format json
+./bootstrap.sh list              # show install order with indices + state
+./bootstrap.sh run consul vault  # install only these two (by id)
+./bootstrap.sh run 3 4           # install only components 3 and 4 (by index from `list`)
+./bootstrap.sh uninstall nginx   # remove a single component
 ```
+
+## Idempotency guidelines
+
+**stackwiz runs your scripts again on every `run`.** Even though the engine skips components whose version + config-hash haven't changed (status: `noop`), you should still write scripts that survive being invoked multiple times against an already-configured host. This matters because:
+
+- Operators re-run `wizinstall run` to apply config changes — that re-runs the script with `WIZ_RECONFIGURE=1`
+- Selective installs (`wizinstall run consul`) may run a script whose target is already present
+- Upgrades run the same `install/<id>.sh` with `WIZ_UPGRADE=1` and `WIZ_OLD_VERSION=<previous>`
+- Partial failures need to be recoverable — just re-run after fixing the underlying issue
+
+### The five rules
+
+1. **Check before you mutate.** `useradd`, `install -d`, `mkdir -p`, `cat > file`, `systemctl enable` are idempotent. `useradd` on an existing user fails — guard with `id -u <user> >/dev/null 2>&1 || useradd ...`.
+2. **`set -euo pipefail` + explicit `|| true`** on expected-to-fail commands. `grep`, `test`, and conditional operations in pipelines will kill the script via pipefail.
+3. **Use `install -o user -g group -m mode`** instead of `cp` + `chown` + `chmod` — it's atomic and idempotent.
+4. **`systemctl restart` over `start`** — restart is safe on an inactive unit (becomes a start); start is a no-op on an active unit. `systemctl enable --now` is similarly safe.
+5. **Branch on `WIZ_ACTION` when the upgrade path differs.** A version bump might need a data migration; a reconfigure might just need a reload. Example:
+   ```bash
+   case "${WIZ_ACTION:-install}" in
+     install)      echo "fresh install" ;;
+     upgrade)      echo "upgrading from ${WIZ_OLD_VERSION} to ${WIZ_COMPONENT_VERSION}"; migrate_data ;;
+     reconfigure)  echo "config changed, reloading"; systemctl reload myservice ;;
+   esac
+   ```
+
+### Idempotent patterns by resource type
+
+| Resource | Idempotent pattern |
+|---|---|
+| **apt package** | `apt-get install -y --no-install-recommends <pkg>` (already idempotent; skips if installed) |
+| **Binary install** | Version-guard: `"$(mybin version)" != "v${WIZ_COMPONENT_VERSION}"` → download + `install -m 0755` |
+| **System user** | `id -u <user> >/dev/null 2>&1 \|\| useradd --system --home /etc/mysvc --shell /bin/false <user>` |
+| **Directory** | `install -d -o <user> -g <user> -m 0750 /var/lib/mysvc` |
+| **Config file** | `cat > /etc/mysvc/config.hcl <<EOF ... EOF` (always overwrites — source of truth is the script) |
+| **systemd unit** | `cat > /etc/systemd/system/mysvc.service <<EOF ... EOF && systemctl daemon-reload && systemctl enable mysvc && systemctl restart --no-block mysvc` |
+| **Service health** | Poll an HTTP / TCP check after `restart --no-block` instead of relying on `Type=notify` |
+| **docker compose stack** | `docker compose --env-file .env up -d` (recreates changed containers, leaves others alone); wait on a health endpoint rather than a fixed sleep |
+| **docker volume** | Don't pre-create; let compose manage. Only `docker volume rm` on uninstall |
+| **Consul service** | Let stackwiz register via `consul_services:` — don't call the Consul API from install scripts |
+| **Vault secret** | Use `WIZ_SECRET_<ID>` from env — stackwiz materializes them into Vault before the script runs |
+| **TLS cert** | `. "${STACKWIZ_STATE_DIR}/bin/stackwiz-tls.sh" && stackwiz_tls_ensure "$hostname"` — already idempotent (30-day checkend) |
+
+### Verifying readiness, not just starting
+
+Starting a systemd unit doesn't mean the service is ready to accept traffic. After `systemctl restart --no-block`, poll:
+
+```bash
+systemctl enable mysvc
+systemctl restart --no-block mysvc
+for i in $(seq 1 60); do
+  if curl -fs http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+    echo "mysvc ready"
+    exit 0
+  fi
+  sleep 1
+done
+echo "mysvc failed to become ready within 60s" >&2
+journalctl -u mysvc --no-pager --since '2 minutes ago' | tail -40 >&2
+exit 1
+```
+
+Two reasons to use `--no-block`:
+- `systemctl start/restart` with `Type=notify` hangs forever if the service doesn't send `sd_notify` (which some binaries don't under all kernels); `--no-block` returns immediately.
+- Your own HTTP poll gives you a better failure message than systemd's timeout.
+
+### Anti-patterns
+
+- **Don't `rm -rf /opt/<app>` unconditionally at the top of install scripts** — that wipes user data on every re-run. Uninstall scripts clean up; install scripts bring forward.
+- **Don't hard-code `sleep N`** for "let it start up" — use a poll loop. Sleeps hide real slowness and fail under load.
+- **Don't initialize Vault / databases twice.** Guard with status checks (`vault status -format=json | jq -e '.initialized == false'`).
+- **Don't regenerate secrets on every run.** Use `immutable: true` in the manifest for anything paired with external state (admin passwords, signing keys).
+- **Don't write to `/tmp` without `mktemp`.** Cross-run collisions are a real issue.
+- **Don't rely on stdout ordering across `server` and `worker` containers** — docker compose starts them in parallel. Use healthchecks + `depends_on: condition: service_healthy`.
+
+### Idempotent install script skeleton
+
+Use this as a starting template:
+
+```bash
+#!/usr/bin/env bash
+#
+# Install <component>.
+#
+# Expected env (from stackwiz):
+#   WIZ_COMPONENT_VERSION    version tag
+#   WIZ_CFG_DOMAIN           public hostname
+#   WIZ_SECRET_ADMIN_PASSWORD admin password
+#
+set -euo pipefail
+
+VERSION="${WIZ_COMPONENT_VERSION:-1.0.0}"
+DOMAIN="${WIZ_CFG_DOMAIN:?missing domain}"
+ADMIN_PW="${WIZ_SECRET_ADMIN_PASSWORD:?missing admin_password}"
+
+# 1. System user (idempotent)
+if ! id -u mysvc >/dev/null 2>&1; then
+  useradd --system --home /etc/mysvc --shell /bin/false mysvc
+fi
+
+# 2. Data directories (idempotent)
+install -d -o mysvc -g mysvc -m 0750 /var/lib/mysvc /etc/mysvc
+
+# 3. Binary — only re-download on version mismatch
+installed_version="$(/usr/local/bin/mysvc version 2>/dev/null | awk '{print $2}' || true)"
+if [ "${installed_version}" != "v${VERSION}" ]; then
+  apt-get update
+  apt-get install -y --no-install-recommends curl ca-certificates unzip
+  tmp="$(mktemp -d)"
+  curl -fsSLo "${tmp}/mysvc.zip" "https://releases.example.com/mysvc/${VERSION}/linux-amd64.zip"
+  unzip -o "${tmp}/mysvc.zip" -d "${tmp}"
+  install -m 0755 "${tmp}/mysvc" /usr/local/bin/mysvc
+  rm -rf "${tmp}"
+fi
+
+# 4. Config + systemd unit (always rewritten — the script is the source of truth)
+cat > /etc/mysvc/config.yaml <<EOF
+domain: ${DOMAIN}
+admin_password: ${ADMIN_PW}
+EOF
+chown mysvc:mysvc /etc/mysvc/config.yaml
+chmod 0640 /etc/mysvc/config.yaml
+
+cat > /etc/systemd/system/mysvc.service <<'UNIT'
+[Unit]
+Description=My Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=mysvc
+Group=mysvc
+ExecStart=/usr/local/bin/mysvc serve -config /etc/mysvc/config.yaml
+Restart=on-failure
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable mysvc
+systemctl restart --no-block mysvc
+
+# 5. Wait for readiness (not just "started")
+for i in $(seq 1 60); do
+  if curl -fs "http://127.0.0.1:8080/healthz" >/dev/null 2>&1; then
+    echo "mysvc ${VERSION} ready at https://${DOMAIN}"
+    exit 0
+  fi
+  sleep 1
+done
+echo "mysvc did not become ready within 60s" >&2
+journalctl -u mysvc --no-pager --since '2 minutes ago' | tail -40 >&2
+exit 1
+```
+
+## Selective installation
+
+You don't always want to run the whole manifest. Common cases:
+
+- Bootstrapping a new host where Consul + Vault already exist on another VM — install only the app components
+- Reconfiguring one component after rotating a credential
+- Retrying a single component after a transient failure without re-running expensive upstream steps
+
+stackwiz gives you a 061-style step list + positional selection:
+
+```bash
+./bootstrap.sh list                    # show the install order with indices + state
+
+#   #  id                    version       state         description
+# ------------------------------------------------------------------
+#   1  consul                1.19.2        installed     HashiCorp Consul [consul:8500]
+#   2  vault                 1.17.6        installed     HashiCorp Vault [vault:8200]
+#   3  authentik             2025.10.4     installed     Authentik (SSO + LDAPS) [authentik:9000, authentik-ldap:636]
+#   4  nginx                 1.0.0         pending       nginx (HTTPS reverse proxy) [nginx:443]
+
+./bootstrap.sh run nginx               # run ONLY nginx (by id)
+./bootstrap.sh run 4                   # same thing (by 1-based index)
+./bootstrap.sh run authentik nginx     # run both, in topological order
+./bootstrap.sh run --auto authentik    # headless single-component install
+./bootstrap.sh uninstall nginx         # remove only nginx
+```
+
+**Selective install does not auto-include dependencies.** If you `run app` and `app` depends on `k3s`, you're responsible for running `k3s` first. This matches 061's `./deploy.sh 19 20` behavior: literal selection, no magic. The engine still respects topological order *within* the selected set, so `run 4 1 3` executes in the correct order regardless of how you typed it.
+
+For fresh installs, run the whole manifest via `./bootstrap.sh run` (no args). The selective form is a surgical tool, not the default.
+
+### When the TUI is used with pre-selected components
+
+If you run the interactive TUI with positional args — `./bootstrap.sh run authentik nginx` — the welcome screen skips the components picker entirely and jumps straight to config (install mode) or progress (uninstall mode). Re-run without args to get the full picker back.
 
 ## Retrieving installed artifacts
 

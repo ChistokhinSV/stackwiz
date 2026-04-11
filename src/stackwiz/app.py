@@ -46,6 +46,7 @@ class InstallerApp(App[int]):
         self.state = State(state_dir)
 
         self.selected_component_ids: set[str] = set()
+        self.selection_locked: bool = False  # True when CLI pre-selected components
         self.config_values: dict[str, object] = {}
 
         self.consul_probe: ProbeResult | None = None

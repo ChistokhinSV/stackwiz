@@ -106,12 +106,24 @@ class WelcomeScreen(Screen):
             self.app.exit()
 
     def action_proceed(self) -> None:
-        from stackwiz.screens.components import ComponentsScreen
-
         btn = self.query_one("#next", Button)
         if btn.disabled:
             return
         self.installer.build_clients_from_probes()
+
+        # If the CLI already locked a selection (`wizinstall run consul vault`),
+        # skip the components screen entirely and jump to config (install) or
+        # progress (uninstall).
+        if self.installer.selection_locked:
+            if self.installer.mode == "uninstall" or not self.installer.manifest.config:
+                from stackwiz.screens.progress import ProgressScreen
+                self.app.push_screen(ProgressScreen())
+            else:
+                from stackwiz.screens.config import ConfigScreen
+                self.app.push_screen(ConfigScreen())
+            return
+
+        from stackwiz.screens.components import ComponentsScreen
         self.app.push_screen(ComponentsScreen())
 
 
