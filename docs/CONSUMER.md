@@ -4,13 +4,17 @@ This is the reference for anyone writing a new stackwiz-based installer — a pe
 
 ## What stackwiz gives you
 
-- **Declarative manifest**: list components, their dependencies, versions, health checks, and Consul service definitions.
-- **Five-screen TUI wizard** (Welcome → Components → Config → Progress → Summary) for interactive runs, plus a `--auto` headless mode for CI.
+- **Declarative manifest**: list components, their dependencies, versions, health checks, and Consul service definitions (one or many per component).
+- **Five-screen TUI wizard** (Welcome → Components → Config → Progress → Summary) built on Textual, with consistent layout: sticky `Header` + scrollable `#main` + docked `#button-bar` (Back/Abort/Quit on the left, primary Next on the right) + sticky `Footer`. Works in small terminal windows — content scrolls, buttons stay visible.
+- **Headless mode** (`--auto`) for CI and re-runs. Same engine + same log output as the TUI, just without the pty.
 - **Lifecycle**: install, upgrade (version diff), reconfigure (config-hash diff), and uninstall with a companion script contract.
-- **Secrets**: generated passwords materialized into Vault KVv2, with `immutable` flag so re-runs never rotate them.
-- **Service registry**: Consul catalog + health checks for every component.
+- **Selective installation**: `wizinstall run consul vault` or `wizinstall run 3 4` (by id or 1-based index from `wizinstall list`), same UX as 061's `./deploy.sh 19 20`.
+- **`${domain}` cascade**: one knob in `.stackwiz.env` updates every derived hostname, admin email, and LDAP base DN. `wizinstall init-env` generates a commented scaffold from the manifest.
+- **Secrets**: generated passwords materialized into Vault KVv2, with `immutable` flag so re-runs never rotate them. Per-service Vault policies applied automatically.
+- **Service registry**: Consul catalog + health checks for every component. Multi-service components register multiple endpoints from a single `consul_services:` list.
 - **TLS helper**: a shared `stackwiz-tls.sh` script (ported from `061.awx_installation`) that does Let's Encrypt via Cloudflare/Route53/HTTP-01 or self-signed fallback, idempotent via `openssl x509 -checkend`.
-- **Info retrieval**: `wizinstall info` prints a text/markdown/JSON summary of all installed components, URLs, and secret paths.
+- **Forensic install log**: `/state/install.log` captures every stdout/stderr line from every script plus engine events, labeled by component, in both TUI and headless runs.
+- **Info retrieval**: `wizinstall info` and the auto-written `/state/summary.md` surface installed components, URLs, and (masked) secret paths without re-entering the container.
 
 ## Prerequisites on the target host
 
@@ -624,19 +628,72 @@ If you run the interactive TUI with positional args — `./bootstrap.sh run auth
 
 ## Retrieving installed artifacts
 
-After a successful install, two things exist on the host:
+After a successful install, several things exist on the host under `${STATE_DIR}` (default `/var/lib/stackwiz`):
 
-- `${STATE_DIR}/summary.md` — markdown summary of components, services, config, and (masked) secret paths. Refreshed on every install run, plus whenever `info` is called. Readable from the host without running the container.
-- `${STATE_DIR}/installed.yaml` — per-component version + config-hash + timestamp + consul service names.
+- **`summary.md`** — markdown summary of components, services, config, and (masked) secret paths. Refreshed on every install run, plus whenever `info` is called. Readable from the host without running the container.
+- **`installed.yaml`** — per-component version + config-hash + timestamp + consul service names. The engine's source of truth for upgrade detection.
+- **`install.log`** — every line of every script's stdout/stderr, plus engine events. See the next section.
+- **`config.yaml`** — the last `config:` values saved by the engine. Template fields (defaults with `${...}`) are re-derived each run; non-template fields are pre-filled from this file.
+- **`bin/`** — framework helpers staged at the start of every run (`stackwiz-tls.sh`, `stackwiz-nginx-default.conf.template`). Install scripts source these.
+- **`templates/`** — mirror of your consumer repo's `templates/` directory, so host-side scripts can read it.
+- **`vault-token`**, **`vault-unseal`**, **`vault-init.json`** — present only when stackwiz bootstrapped Vault itself. **Back up `vault-init.json` off the VM and delete it** — it contains the root token in cleartext.
 
 For the richest output (queries live Consul catalog + Vault KV), use the `info` subcommand:
 
 ```bash
 ./bootstrap.sh info                              # masked
-./bootstrap.sh info --show-secrets                # unmasked
+./bootstrap.sh info --show-secrets               # unmasked
 ./bootstrap.sh info --format markdown > ~/current.md
 ./bootstrap.sh info --format json | jq '.components[].services'
+./bootstrap.sh list                              # install order + state, no backend queries
 ```
+
+## Install log
+
+`${STATE_DIR}/install.log` is the primary forensic trail. It's written by **both** the TUI and headless modes (same code path in `engine._run_script`). Each session starts with a visible marker:
+
+```
+[20:14:19 11.04.2026] INFO  stackwiz: ========================================================================
+[20:14:19 11.04.2026] INFO  stackwiz: stackwiz session started [headless:install] at 2026-04-11T20:14:19+00:00
+```
+
+Everything that happens during the run is logged:
+
+| Logger | Level | What it covers |
+|---|---|---|
+| `stackwiz` | INFO  | Session markers |
+| `engine` | INFO  | Component lifecycle: `engine: nginx: install`, `engine: nginx: registered in consul as nginx`, `engine: install finished: 1 ok, 0 failed, 3 skipped` |
+| `script.<component_id>` | INFO  | Every stdout line from that component's bash script |
+| `script.<component_id>` | WARNING | Every stderr line (use this to spot potential issues without reading the full log) |
+
+Sample from a real run:
+
+```
+[20:14:20] INFO    engine:       staged framework helpers at /state/bin
+[20:14:20] INFO    engine:       staged manifest templates at /state/templates
+[20:14:20] INFO    engine:       nginx: install
+[20:14:20] INFO    script.nginx: → running install/nginx.sh (install)
+[20:14:20] INFO    script.nginx: stackwiz-tls: generated self-signed cert for auth.stackwiz.lab
+[20:14:20] INFO    script.nginx: nginx: cert=/etc/stackwiz/tls/auth.stackwiz.lab.crt key=...
+[20:14:20] WARNING script.nginx: nginx: configuration file /etc/nginx/nginx.conf test is successful
+[20:14:20] WARNING script.nginx: Created symlink /etc/systemd/system/multi-user.target.wants/nginx.service
+[20:14:21] INFO    script.nginx: nginx: authentik reachable via HTTPS
+[20:14:21] INFO    script.nginx: ← exit 0 (ok)
+[20:14:21] INFO    engine:       nginx: registered in consul as nginx
+[20:14:21] INFO    engine:       install finished: 1 ok, 0 failed, 3 skipped
+[20:14:21] INFO    engine:       summary written to /state/summary.md
+```
+
+Useful greps from the host:
+
+```bash
+sudo tail -f /var/lib/stackwiz/install.log       # live during a run
+sudo grep '^\[.*\] WARNING' /var/lib/stackwiz/install.log  # stderr lines across all runs
+sudo grep 'script.nginx' /var/lib/stackwiz/install.log     # one component only
+sudo grep -A1 'session started' /var/lib/stackwiz/install.log  # session start times
+```
+
+The log **appends** across sessions — there's no rotation, so if you're running in a long-lived VM delete or truncate the file occasionally. `sudo truncate -s 0 /var/lib/stackwiz/install.log` is safe mid-run; the handler keeps writing to the same inode.
 
 ## Uninstall contract
 
