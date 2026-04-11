@@ -1,68 +1,24 @@
-# SOPS Installer — Modular TUI Installer Framework
+# stackwiz — Modular TUI Installer Framework
 
-Reusable TUI-based installer framework with Consul service registry integration. Each project (AWX, monitoring, CI/CD) defines a `components.yaml` manifest; the framework provides the interactive installation experience.
+A reusable installer framework that reads a per-project `components.yaml` manifest, drives an interactive Textual TUI wizard, runs install scripts on the host, and stores service metadata in Consul + secrets in HashiCorp Vault.
 
-## Problem
+- **One image**, many projects. Each consumer repo ships a tiny `bootstrap.sh` that pulls `ghcr.io/chistokhin/stackwiz:latest`.
+- **No Python on the host.** The installer runs entirely inside a container; bash scripts are run on the host via `nsenter`.
+- **Declarative components**. YAML manifest lists the components, their dependencies, their versions, their Consul service definitions, and what secrets they need.
+- **Service discovery built in**. Consul + Vault are found at `consul.<domain>` / `vault.<domain>` via DNS, with environment overrides and a local-fallback probe.
+- **Install, upgrade, reconfigure, uninstall**. State is tracked in `/state/installed.yaml`; re-runs detect version bumps and config changes.
 
-Infrastructure projects like AWX deployment (061) use monolithic bash scripts (3,300+ lines). Adding a new project means duplicating the installation pattern. No service discovery between components on different VMs.
+## Quickstart for a consumer project
 
-## Solution
+Your repo needs three things: `components.yaml`, `install/*.sh` scripts, and a `bootstrap.sh`.
 
-A shared pip-installable framework that:
-- Reads a per-repo `components.yaml` manifest
-- Shows a TUI for component selection and configuration
-- Runs install scripts with real-time progress
-- Registers services in Consul for cross-VM discovery
-- Stores secrets in Consul KV
-
-## Architecture
-
-```
-sops-installer (this repo)           Per-project repo (e.g. 061.awx)
-├── installer/                       ├── components.yaml
-│   ├── app.py         (Textual)     ├── install/
-│   ├── screens/                     │   ├── k3s.sh
-│   │   ├── welcome.py               │   ├── awx.sh
-│   │   ├── components.py            │   ├── graylog.sh
-│   │   ├── config.py                │   └── ...
-│   │   ├── progress.py              └── templates/
-│   │   └── summary.py                   └── *.j2
-│   ├── engine.py      (orchestration)
-│   ├── consul_client.py (registration + discovery)
-│   └── manifest.py    (YAML parser)
-├── pyproject.toml
-└── README.md
-```
-
-## TUI Flow
-
-```
-Welcome → Component Selection → Configuration → Install Progress → Summary
-```
-
-1. **Welcome**: System info, Consul connection status
-2. **Components**: Checkboxes with required/optional, dependency resolution
-3. **Config**: Prompts from manifest (domain, IP, TLS mode, etc.)
-4. **Progress**: Real-time per-component status (pending → running → done/failed)
-5. **Summary**: Credentials, URLs, Consul service health
-
-## Technology Stack
-
-| Component | Choice | Rationale |
-|-----------|--------|-----------|
-| TUI framework | **Textual** (Python) | Modern look, async, SelectionList/ProgressBar widgets |
-| Manifest format | **YAML** | Declarative, typed, supports dependencies |
-| Service registry | **Consul** | Service discovery + KV store + health checks |
-| Secret storage | **Consul KV** (+ Vault later) | Encrypted, accessible cross-VM |
-| Package manager | **UV** | Fast, pyproject.toml native |
-| Install scripts | **Bash** | Reuse existing scripts from deploy.sh |
-
-## Component Manifest Schema (v1)
+### 1. Write `components.yaml`
 
 ```yaml
 name: awx-platform
 display_name: "AWX Automation Platform"
-version: "1.0"
+version: "1.0.0"
+domain: "example.internal"           # drives consul.<domain> / vault.<domain>
 
 consul:
   required: true
@@ -71,106 +27,177 @@ consul:
 components:
   - id: k3s
     name: "K3s Kubernetes"
+    version: "1.30.0"
     required: true
     group: core
-    depends: []
     install: install/k3s.sh
+    uninstall: install/k3s.uninstall.sh
     verify: "sudo k3s kubectl get nodes"
     consul_service:
       name: "k3s"
       port: 6443
       check:
-        http: "https://localhost:6443/healthz"
+        http: "https://127.0.0.1:6443/healthz"
         interval: "30s"
 
-  - id: graylog
-    name: "Graylog (Log Aggregation)"
-    required: false
-    default: true
-    group: observability
-    install: install/graylog.sh
+  - id: awx
+    name: "AWX"
+    version: "24.0.0"
+    required: true
+    group: core
+    depends: [k3s]
+    install: install/awx.sh
+    uninstall: install/awx.uninstall.sh
     consul_service:
-      name: "graylog"
-      port: 9000
-      tags: ["logging"]
+      name: "awx"
+      port: 30080
+      check:
+        http: "http://127.0.0.1:30080/api/v2/ping/"
+        interval: "30s"
     consul_discover:
-      - service: "awx"
-        env_var: AWX_HOST
+      - service: "graylog"
+        env_var: GRAYLOG_HOST
 
 config:
   - id: awx_domain
-    label: "AWX domain name"
+    label: "AWX public hostname"
     type: text
-    default: ""
+    required: true
   - id: tls_mode
-    label: "TLS certificate mode"
+    label: "TLS mode"
     type: select
     choices: ["self-signed", "auto", "manual-dns"]
     default: "self-signed"
 
 secrets:
-  - id: awx_admin_password
+  - id: admin_password
     generate: true
     length: 16
-  - id: graylog_password_secret
+  - id: cluster_token
     generate: true
     length: 96
     immutable: true
 ```
 
-## Consul Integration
+### 2. Write install scripts
 
-### Service Registration
-Each installed component registers in Consul with health checks:
-```python
-consul.register("awx", port=30080, check={"http": "http://localhost:30080/api/v2/ping/"})
+Each `install/<component>.sh` is a plain bash script. stackwiz sets these environment variables before invoking it:
+
+| Variable | Meaning |
+|---|---|
+| `WIZ_COMPONENT_ID` | the component id |
+| `WIZ_COMPONENT_VERSION` | manifest version for this component |
+| `WIZ_ACTION` | `install` \| `upgrade` \| `reconfigure` \| `uninstall` |
+| `WIZ_UPGRADE=1` | set during upgrades; also `WIZ_OLD_VERSION` |
+| `WIZ_RECONFIGURE=1` | set when config changed but version didn't |
+| `WIZ_CFG_<FIELD>` | every value from the `config:` section (uppercased) |
+| `WIZ_SECRET_<ID>` | each generated secret's value |
+| `WIZ_SECRET_<ID>_PATH` | the Vault KV path where it lives |
+| `CONSUL_HTTP_ADDR` | reachable Consul agent |
+| `VAULT_ADDR` | reachable Vault |
+| `STACKWIZ_STATE_DIR` | host-side state directory (where `stackwiz-tls.sh` and other helpers are staged) |
+| any variables from `consul_discover:` mappings | looked up from Consul catalog before the script runs |
+
+Write idempotent scripts so re-runs do the right thing.
+
+Companion `install/<component>.uninstall.sh` handles teardown; optional `install/<component>.upgrade.sh` can handle complex version migrations (otherwise the regular install script runs with `WIZ_UPGRADE=1`).
+
+### 3. Write `bootstrap.sh`
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
+
+sudo mkdir -p /var/lib/stackwiz
+sudo docker pull ghcr.io/chistokhin/stackwiz:latest
+sudo docker run --rm -it \
+  --privileged --pid=host --network=host \
+  -v "$PWD:/manifest:ro" \
+  -v /var/lib/stackwiz:/state \
+  -e CONSUL_HTTP_ADDR="${CONSUL_HTTP_ADDR:-}" \
+  -e VAULT_ADDR="${VAULT_ADDR:-}" \
+  -e VAULT_TOKEN="${VAULT_TOKEN:-}" \
+  ghcr.io/chistokhin/stackwiz:latest "$@"
 ```
 
-### Cross-VM Discovery
-Another repo's manifest discovers services:
-```yaml
-consul_discover:
-  - service: "awx"        # Find AWX from Consul catalog
-    env_var: AWX_URL       # Pass to install script as env var
+Then on the target Ubuntu/Debian VM:
+
+```bash
+git clone <your-project-repo>
+cd <your-project-repo>
+./bootstrap.sh             # launches the TUI
+./bootstrap.sh --uninstall # reverse teardown
 ```
 
-### Secret Storage
-Generated secrets stored in Consul KV:
+## How it works
+
 ```
-awx/secrets/admin_password → encrypted value
-awx/config/domain → awx.example.com
+Host VM (Ubuntu/Debian)
+  bootstrap.sh → docker run ──▶ stackwiz container
+                                   │ Textual TUI
+                                   │
+                                   │ nsenter --target 1 --all -- bash install/<script>.sh
+                                   ▼
+                                 host systemd / apt / k3s / docker
 ```
 
-## Existing Projects That Will Use This
+1. **Welcome** screen probes `consul.<domain>` then `127.0.0.1:8500`, same for Vault. Reachable backends are adopted; missing ones can be installed as part of the run if the manifest defines `consul` or `vault` components.
+2. **Components** screen shows `SelectionList` grouped by `group:`, with dependency auto-include and per-component status badges (`[install]` / `[upgrade 1.2→1.3]` / `[ok]`).
+3. **Config** screen builds a dynamic form from the manifest's `config:` section. Values are saved to `/state/config.yaml` for re-runs.
+4. **Progress** screen streams each install script's stdout/stderr into a `RichLog` while a `DataTable` tracks per-component status. `/state/install.log` captures the full transcript.
+5. **Summary** screen lists installed components, shows the Vault paths for generated secrets, and points at the log.
 
-| Project | Repo | Components |
-|---------|------|------------|
-| AWX Automation Platform | 061.awx_installation | K3s, AWX, nginx, Graylog, Kestra, MCP |
-| Consul + Authentik | (new) | Consul server, Authentik SSO |
-| Monitoring Stack | (future) | Prometheus, Grafana, Alertmanager |
-| CI/CD Pipeline | (future) | GitLab Runner, ArgoCD |
+## State directory layout
 
-## Migration Path from deploy.sh
+```
+/state/
+├── install.log         # full log from every session
+├── installed.yaml      # {component: version, installed_at, config_hash, consul_service}
+├── config.yaml         # last-used config values (for pre-fill on re-run)
+└── vault-init.json     # ONLY on first-run Vault bootstrap; back up then delete
+```
 
-1. Extract heredoc install steps → `install/*.sh` scripts
-2. Extract .env.template → `components.yaml` config + secrets sections
-3. Extract nginx templates → `templates/*.j2`
-4. Keep deploy.sh as fallback (deprecated but functional)
-5. New entry point: `sops-install` CLI command
+## CLI
 
-## Implementation Order
+```
+wizinstall [OPTIONS]
 
-1. **Core framework**: manifest parser, engine, CLI entry point
-2. **TUI screens**: welcome, components, config, progress, summary
-3. **Consul client**: register, discover, KV get/put
-4. **AWX manifest**: components.yaml for 061 repo
-5. **Install scripts**: extract from deploy.sh
-6. **Testing**: Vagrant VM end-to-end test
-7. **Consul+Authentik manifest**: first cross-repo test
+  --manifest PATH     components.yaml [default: /manifest/components.yaml]
+  --state PATH        state dir [default: /state]
+  --uninstall         reverse teardown
+  --validate          validate manifest and exit
+  -V, --version
+  -h, --help
+```
 
-## Open Questions
+## Developing locally
 
-- Whiptail fallback for minimal systems (no Python)?
-- Consul ACL tokens for multi-tenant secret isolation?
-- How to handle component upgrades (not just fresh install)?
-- Should the framework support uninstall/rollback?
+```bash
+uv sync --extra dev
+uv run wizinstall --validate --manifest tests/manifest_valid.yaml
+uv run pytest -q
+```
+
+Running the TUI locally (outside a container, on Linux): set `STACKWIZ_EXECUTOR_MODE=direct` so scripts run in the current namespace instead of trying to `nsenter` into host PID 1.
+
+## Manifest reference
+
+See `src/stackwiz/manifest.py` for the authoritative Pydantic models. Top-level keys:
+
+| Key | Required | Notes |
+|---|---|---|
+| `name` | yes | slug |
+| `display_name` | yes | human-readable |
+| `version` | yes | manifest semver |
+| `domain` | yes | drives `consul.<domain>` / `vault.<domain>` |
+| `consul_host`, `vault_host` | no | override auto-discovery |
+| `consul` | yes | `{ required, service_prefix }` |
+| `components` | yes | list of Component entries |
+| `config` | no | list of ConfigField entries |
+| `secrets` | no | list of Secret entries |
+
+## License
+
+MIT

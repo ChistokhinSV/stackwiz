@@ -1,0 +1,121 @@
+"""Welcome screen: host info, Consul + Vault discovery, proceed gate."""
+from __future__ import annotations
+
+import logging
+import platform
+from typing import TYPE_CHECKING
+
+from textual import work
+from textual.app import ComposeResult
+from textual.containers import Center, Horizontal, Vertical, VerticalScroll
+from textual.screen import Screen
+from textual.widgets import Button, Footer, Header, Label, Static
+
+from stackwiz.discovery import ProbeResult, Source, probe_consul, probe_vault
+
+if TYPE_CHECKING:
+    from stackwiz.app import InstallerApp
+
+log = logging.getLogger("stackwiz.welcome")
+
+
+class WelcomeScreen(Screen):
+    BINDINGS = [("q", "app.quit", "Quit"), ("n", "proceed", "Next")]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.consul_result: ProbeResult | None = None
+        self.vault_result: ProbeResult | None = None
+
+    @property
+    def installer(self) -> InstallerApp:
+        return self.app  # type: ignore[return-value]
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with VerticalScroll():
+            with Vertical(id="welcome-box"):
+                yield Label(f"[b]{self.installer.manifest.display_name}[/b] "
+                            f"v{self.installer.manifest.version}", id="title")
+                yield Static(f"Mode: [cyan]{self.installer.mode}[/cyan]")
+                yield Static(f"Domain: [cyan]{self.installer.manifest.domain}[/cyan]")
+                yield Static(
+                    f"Host: {platform.system()} {platform.release()} "
+                    f"({platform.machine()})"
+                )
+                yield Static("")
+                yield Label("[b]Service discovery[/b]")
+                yield Static("Probing Consul...", id="consul-line")
+                yield Static("Probing Vault...", id="vault-line")
+                yield Static("")
+                yield Static("", id="proceed-hint")
+                with Center():
+                    with Horizontal():
+                        yield Button("Next", id="next", variant="primary", disabled=True)
+                        yield Button("Quit", id="quit", variant="error")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.run_probes()
+
+    @work(exclusive=True)
+    async def run_probes(self) -> None:
+        manifest = self.installer.manifest
+        self.consul_result = await probe_consul(manifest.domain, manifest.consul_host)
+        self.query_one("#consul-line", Static).update(_format_probe("Consul", self.consul_result))
+        self.vault_result = await probe_vault(manifest.domain, manifest.vault_host)
+        self.query_one("#vault-line", Static).update(_format_probe("Vault", self.vault_result))
+
+        missing = []
+        if not self.consul_result.reachable:
+            missing.append("Consul")
+        if not self.vault_result.reachable:
+            missing.append("Vault")
+
+        hint = self.query_one("#proceed-hint", Static)
+        next_btn = self.query_one("#next", Button)
+
+        if missing:
+            component_ids = {c.id for c in manifest.components}
+            can_bootstrap = all(
+                name.lower() in component_ids for name in missing
+            )
+            if can_bootstrap:
+                hint.update(
+                    f"[yellow]{', '.join(missing)} not reachable; will be installed "
+                    f"as components in this run.[/yellow]"
+                )
+                next_btn.disabled = False
+            else:
+                hint.update(
+                    f"[red]{', '.join(missing)} not reachable and not in manifest. "
+                    f"Set env / DNS to point at reachable instances, then re-run.[/red]"
+                )
+                next_btn.disabled = True
+        else:
+            hint.update("[green]All backends reachable. Press Next to continue.[/green]")
+            next_btn.disabled = False
+
+        self.installer.consul_probe = self.consul_result
+        self.installer.vault_probe = self.vault_result
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "next":
+            self.action_proceed()
+        elif event.button.id == "quit":
+            self.app.exit()
+
+    def action_proceed(self) -> None:
+        from stackwiz.screens.components import ComponentsScreen
+
+        btn = self.query_one("#next", Button)
+        if btn.disabled:
+            return
+        self.installer.build_clients_from_probes()
+        self.app.push_screen(ComponentsScreen())
+
+
+def _format_probe(name: str, result: ProbeResult) -> str:
+    if result.source is Source.MISSING:
+        return f"[red]✗[/red] {name}: not reachable ({result.detail})"
+    return f"[green]✓[/green] {name}: {result.address} [dim]({result.source.value})[/dim]"

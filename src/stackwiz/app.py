@@ -1,0 +1,70 @@
+"""Textual App shell and screen routing."""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Literal
+
+from textual.app import App
+
+from stackwiz import log as log_module
+from stackwiz.consul_client import ConsulClient
+from stackwiz.discovery import ProbeResult
+from stackwiz.manifest import Manifest
+from stackwiz.state import State
+from stackwiz.vault_client import VaultClient
+
+Mode = Literal["install", "uninstall"]
+
+
+class InstallerApp(App[int]):
+    """Top-level Textual application."""
+
+    TITLE = "stackwiz"
+    SUB_TITLE = "modular installer"
+    CSS = """
+    Screen { align: center top; }
+    #welcome-box, #components-box, #config-box, #summary-box { padding: 1 2; width: 100%; }
+    #progress-table { height: 40%; min-height: 8; }
+    #progress-log { height: 1fr; min-height: 6; background: $surface; }
+    Button { margin: 1 1; }
+    """
+
+    def __init__(
+        self,
+        manifest: Manifest,
+        state_dir: Path,
+        mode: Mode = "install",
+        manifest_dir: Path | None = None,
+    ) -> None:
+        super().__init__()
+        self.manifest = manifest
+        self.state_dir = state_dir
+        self.manifest_dir: Path = manifest_dir or Path("/manifest")
+        self.mode: Mode = mode
+        self.sub_title = f"{manifest.display_name} v{manifest.version} ({mode})"
+
+        self.state = State(state_dir)
+
+        self.selected_component_ids: set[str] = set()
+        self.config_values: dict[str, object] = {}
+
+        self.consul_probe: ProbeResult | None = None
+        self.vault_probe: ProbeResult | None = None
+        self.consul_client: ConsulClient | None = None
+        self.vault_client: VaultClient | None = None
+
+        self.materialized_secrets: dict[str, object] = {}
+
+        log_module.configure(state_dir)
+
+    def on_mount(self) -> None:
+        from stackwiz.screens.welcome import WelcomeScreen
+
+        self.push_screen(WelcomeScreen())
+
+    def build_clients_from_probes(self) -> None:
+        """Instantiate Consul + Vault clients from the welcome-screen probes."""
+        if self.consul_probe and self.consul_probe.reachable and self.consul_probe.address:
+            self.consul_client = ConsulClient(self.consul_probe.address)
+        if self.vault_probe and self.vault_probe.reachable and self.vault_probe.address:
+            self.vault_client = VaultClient(self.vault_probe.address)

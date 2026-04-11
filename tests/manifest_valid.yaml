@@ -1,0 +1,80 @@
+name: example-stack
+display_name: "Example Stack"
+version: "1.0.0"
+domain: "example.internal"
+
+consul:
+  required: true
+  service_prefix: "example"
+
+components:
+  - id: k3s
+    name: "K3s Kubernetes"
+    version: "1.30.0"
+    required: true
+    group: core
+    install: install/k3s.sh
+    uninstall: install/k3s.uninstall.sh
+    verify: "sudo k3s kubectl get nodes"
+    consul_service:
+      name: "k3s"
+      port: 6443
+      check:
+        http: "https://localhost:6443/healthz"
+        interval: "30s"
+
+  - id: app
+    name: "Example App"
+    version: "2.1.0"
+    required: true
+    group: core
+    depends: [k3s]
+    install: install/app.sh
+    uninstall: install/app.uninstall.sh
+    consul_service:
+      name: "app"
+      port: 8080
+      tags: ["primary"]
+      check:
+        http: "http://localhost:8080/health"
+        interval: "15s"
+
+  - id: graylog
+    name: "Graylog"
+    version: "5.2.0"
+    required: false
+    default: true
+    group: observability
+    depends: [app]
+    install: install/graylog.sh
+    consul_service:
+      name: "graylog"
+      port: 9000
+      tags: ["logging"]
+      check:
+        http: "http://localhost:9000/api/system/lbstatus"
+        interval: "30s"
+    consul_discover:
+      - service: "app"
+        env_var: APP_HOST
+
+config:
+  - id: app_domain
+    label: "App domain name"
+    type: text
+    default: "app.example.internal"
+    required: true
+  - id: tls_mode
+    label: "TLS certificate mode"
+    type: select
+    choices: ["self-signed", "auto", "manual-dns"]
+    default: "self-signed"
+
+secrets:
+  - id: admin_password
+    generate: true
+    length: 16
+  - id: cluster_secret
+    generate: true
+    length: 96
+    immutable: true

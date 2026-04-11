@@ -1,0 +1,168 @@
+"""Pydantic v2 models for components.yaml and loader."""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Literal
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+class ConsulServiceCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    http: str | None = None
+    tcp: str | None = None
+    interval: str = "30s"
+    timeout: str = "5s"
+
+    @model_validator(mode="after")
+    def _one_probe(self) -> ConsulServiceCheck:
+        if not self.http and not self.tcp:
+            raise ValueError("consul check needs either http or tcp")
+        return self
+
+
+class ConsulService(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    port: int
+    tags: list[str] = Field(default_factory=list)
+    check: ConsulServiceCheck | None = None
+
+
+class ConsulDiscover(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    service: str
+    env_var: str
+
+
+class ConsulConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    required: bool = True
+    service_prefix: str
+
+
+class Component(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    version: str = "0.0.0"
+    required: bool = False
+    default: bool = True
+    group: str = "default"
+    depends: list[str] = Field(default_factory=list)
+    install: Path
+    uninstall: Path | None = None
+    upgrade: Path | None = None
+    verify: str | None = None
+    consul_service: ConsulService | None = None
+    consul_discover: list[ConsulDiscover] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("id")
+    @classmethod
+    def _id_slug(cls, v: str) -> str:
+        if not v or not all(c.isalnum() or c in "-_" for c in v):
+            raise ValueError(f"component id must be alphanumeric/-/_: {v!r}")
+        return v
+
+
+class ConfigField(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    label: str
+    type: Literal["text", "select", "bool", "int", "password"]
+    default: Any = None
+    choices: list[str] | None = None
+    required: bool = False
+    help: str | None = None
+
+    @model_validator(mode="after")
+    def _select_has_choices(self) -> ConfigField:
+        if self.type == "select" and not self.choices:
+            raise ValueError(f"config field {self.id!r} is type=select but has no choices")
+        return self
+
+
+class Secret(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    generate: bool = True
+    length: int = 32
+    immutable: bool = False
+    vault_path: str | None = None  # defaults to <service_prefix>/<id> if unset
+
+
+class Manifest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    display_name: str
+    version: str
+    domain: str
+    vault_host: str | None = None
+    consul_host: str | None = None
+    consul: ConsulConfig
+    components: list[Component]
+    config: list[ConfigField] = Field(default_factory=list)
+    secrets: list[Secret] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_deps(self) -> Manifest:
+        ids = {c.id for c in self.components}
+        for c in self.components:
+            for d in c.depends:
+                if d not in ids:
+                    raise ValueError(f"component {c.id!r} depends on unknown component {d!r}")
+        self._topo_sort()  # raises on cycle
+        return self
+
+    def _topo_sort(self) -> list[str]:
+        by_id = {c.id: c for c in self.components}
+        visited: dict[str, int] = {}  # 0=white, 1=gray, 2=black
+        order: list[str] = []
+
+        def visit(cid: str, stack: list[str]) -> None:
+            color = visited.get(cid, 0)
+            if color == 2:
+                return
+            if color == 1:
+                cycle = " -> ".join([*stack, cid])
+                raise ValueError(f"dependency cycle: {cycle}")
+            visited[cid] = 1
+            for d in by_id[cid].depends:
+                visit(d, [*stack, cid])
+            visited[cid] = 2
+            order.append(cid)
+
+        for c in self.components:
+            visit(c.id, [])
+        return order
+
+    def topo_order(self) -> list[Component]:
+        """Components sorted so dependencies come first."""
+        by_id = {c.id: c for c in self.components}
+        return [by_id[i] for i in self._topo_sort()]
+
+    def consul_addr(self) -> str:
+        return self.consul_host or f"consul.{self.domain}"
+
+    def vault_addr(self) -> str:
+        return self.vault_host or f"vault.{self.domain}"
+
+
+def load_manifest(path: Path | str) -> Manifest:
+    """Load and validate a components.yaml file."""
+    p = Path(path)
+    with p.open(encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"manifest root must be a mapping: {p}")
+    return Manifest.model_validate(data)
