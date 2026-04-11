@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -186,7 +185,7 @@ class Engine:
             try:
                 from stackwiz.info import write_summary_md
                 write_summary_md(self.manifest, self.state, self.consul, self.vault)
-                log.info("summary written to %s/summary.md", self.state.state_dir)
+                log.info("summary written to %s", self.state.host_path("summary.md"))
             except Exception as exc:  # noqa: BLE001
                 log.warning("summary.md write failed: %s", exc)
 
@@ -366,8 +365,7 @@ class Engine:
         env["VAULT_ADDR"] = self.vault.address if self.vault else ""
         if self.consul is not None:
             env["CONSUL_HTTP_ADDR"] = self.consul.address
-        host_state = os.environ.get("STACKWIZ_HOST_STATE_DIR")
-        env["STACKWIZ_STATE_DIR"] = host_state or str(self.state.state_dir)
+        env["STACKWIZ_STATE_DIR"] = self.state.host_path()
         return env
 
     def _kv_payload(
@@ -419,7 +417,7 @@ class Engine:
         share_src = next((p for p in share_candidates if p.exists()), None)
         if share_src is not None:
             _copy_dir(share_src, self.state.state_dir / "bin", exec_mode=True)
-            log.info("staged framework helpers at %s/bin", self.state.state_dir)
+            log.info("staged framework helpers at %s", self.state.host_path("bin"))
         else:
             log.warning("framework share dir not found; helper scripts not staged")
 
@@ -430,4 +428,4 @@ class Engine:
                 self.state.state_dir / "templates",
                 exec_mode=False,
             )
-            log.info("staged manifest templates at %s/templates", self.state.state_dir)
+            log.info("staged manifest templates at %s", self.state.host_path("templates"))

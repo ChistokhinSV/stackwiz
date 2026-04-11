@@ -34,7 +34,9 @@ class SummaryScreen(Screen):
             yield Label(f"[b]{status}[/b]")
             yield Static(f"Manifest: {self.installer.manifest.display_name} "
                          f"v{self.installer.manifest.version}")
-            yield Static(f"Log: {self.installer.state_dir}/install.log")
+            state = self.installer.state
+            yield Static(f"Log:     {state.host_path('install.log')}")
+            yield Static(f"Summary: {state.host_path('summary.md')}")
             yield Static("")
 
             yield Label("[b]Installed components[/b]")

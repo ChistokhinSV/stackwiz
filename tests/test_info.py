@@ -119,3 +119,26 @@ def test_write_summary_md_atomic(tmp_path: Path) -> None:
     assert "Example Stack" in content
     # Re-run — should still succeed (atomic replace).
     write_summary_md(manifest, state, consul, vault)
+
+
+def test_host_path_reflected_in_rendered_output(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When STACKWIZ_HOST_STATE_DIR is set, rendered output uses it."""
+    monkeypatch.setenv("STACKWIZ_HOST_STATE_DIR", "/var/lib/stackwiz")
+    manifest, state, consul, vault = _prime(tmp_path)
+    # Sanity: State picked up the host path
+    assert state.host_path() == "/var/lib/stackwiz"
+    assert state.host_path("install.log") == "/var/lib/stackwiz/install.log"
+
+    report = collect(manifest, state, consul, vault, show_secrets=False)
+    # ReportData carries the host path, not the container path
+    assert report.host_state_dir == "/var/lib/stackwiz"
+
+    # All three renderers should mention the host path, not the tmp_path
+    text = render_text(report)
+    md = render_markdown(report)
+    j = render_json(report)
+    for rendered in (text, md, j):
+        assert "/var/lib/stackwiz" in rendered
+        assert str(tmp_path) not in rendered

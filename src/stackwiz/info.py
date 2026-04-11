@@ -54,7 +54,8 @@ class ReportData:
     components: list[ComponentInfo]
     secrets: list[SecretInfo]
     config: dict[str, Any]
-    state_dir: Path
+    state_dir: Path        # actual Path where the file was written (container-side)
+    host_state_dir: str    # host-facing display string (where the operator looks)
 
 
 def collect(
@@ -126,6 +127,7 @@ def collect(
         secrets=secrets,
         config=state.config(),
         state_dir=state.state_dir,
+        host_state_dir=state.host_path(),
     )
 
 
@@ -145,8 +147,9 @@ def render_markdown(report: ReportData, *, show_secrets: bool = False) -> str:
     lines.append(f"# {report.manifest_name} — v{report.manifest_version}")
     lines.append("")
     lines.append(f"- **Domain**: `{report.domain}`")
-    lines.append(f"- **State directory**: `{report.state_dir}`")
-    lines.append(f"- **Install log**: `{report.state_dir}/install.log`")
+    lines.append(f"- **State directory**: `{report.host_state_dir}`")
+    lines.append(f"- **Install log**: `{report.host_state_dir}/install.log`")
+    lines.append(f"- **Summary**: `{report.host_state_dir}/summary.md`")
     lines.append("")
 
     lines.append("## Components")
@@ -198,7 +201,8 @@ def render_text(report: ReportData, *, show_secrets: bool = False) -> str:
     lines: list[str] = []
     lines.append(f"{report.manifest_name}  v{report.manifest_version}")
     lines.append(f"domain: {report.domain}")
-    lines.append(f"state:  {report.state_dir}")
+    lines.append(f"state:  {report.host_state_dir}")
+    lines.append(f"log:    {report.host_state_dir}/install.log")
     lines.append("")
 
     lines.append("Components")
@@ -261,7 +265,7 @@ def render_json(report: ReportData, *, show_secrets: bool = False) -> str:
             "version": report.manifest_version,
             "domain": report.domain,
         },
-        "state_dir": str(report.state_dir),
+        "state_dir": report.host_state_dir,
         "components": [_component(c) for c in report.components],
         "config": report.config,
         "secrets": [_secret(s) for s in report.secrets],

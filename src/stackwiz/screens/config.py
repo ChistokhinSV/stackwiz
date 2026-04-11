@@ -29,9 +29,10 @@ class ConfigScreen(Screen):
         yield Header()
         with VerticalScroll(id="main"):
             yield Label("[b]Configuration[/b]")
+            state = self.installer.state
             yield Static(
                 "Priority: .stackwiz.env > saved state > manifest defaults. "
-                "Values are saved to /state/config.yaml on Next."
+                f"Values saved to {state.host_path('config.yaml')} on Next."
             )
             existing = self._initial_values()
             for field in self.installer.manifest.config:

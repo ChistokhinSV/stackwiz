@@ -57,16 +57,36 @@ class InstalledComponent:
 
 
 class State:
-    """Read/write `/state/installed.yaml` and `/state/config.yaml`."""
+    """Read/write `/state/installed.yaml` and `/state/config.yaml`.
+
+    `state_dir` is the container-side path where the engine actually does
+    I/O. `host_state_dir` is the operator-facing path (same filesystem on
+    the host side of the bind mount) — use it in every message printed to
+    the TUI, summary.md, install.log, or CLI output so operators can find
+    files without knowing container internals. `STACKWIZ_HOST_STATE_DIR`
+    is set by bootstrap.sh to the host path.
+    """
 
     def __init__(self, state_dir: Path) -> None:
+        import os
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        host = os.environ.get("STACKWIZ_HOST_STATE_DIR")
+        self.host_state_dir: Path = Path(host) if host else self.state_dir
         self.installed_path = self.state_dir / STATE_FILENAME
         self.config_path = self.state_dir / CONFIG_FILENAME
         self._installed: dict[str, InstalledComponent] = {}
         self._config: dict[str, Any] = {}
         self._load()
+
+    def host_path(self, *parts: str) -> str:
+        """Render a host-side path for display. Joins parts POSIX-style
+        regardless of the container OS (Windows dev runs work too)."""
+        base = str(self.host_state_dir).replace("\\", "/").rstrip("/")
+        if not parts:
+            return base
+        suffix = "/".join(p.strip("/") for p in parts if p)
+        return f"{base}/{suffix}" if suffix else base
 
     def _load(self) -> None:
         if self.installed_path.exists():
