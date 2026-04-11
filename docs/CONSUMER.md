@@ -114,16 +114,46 @@ config:
 
 ```yaml
 secrets:
-  - id: admin_password     # vault path: <service_prefix>/<id>
-    generate: true         # auto-generate on first install
+  - id: admin_password       # vault path: <service_prefix>/<id>
+    generate: true           # auto-generate on first install
+    type: password           # (default) random alnum
     length: 16
-    immutable: true        # never rotate across upgrades or re-runs
-  - id: existing_key       # not generated — operator must pre-populate in Vault
-    generate: false
+    immutable: true          # never rotate across upgrades or re-runs
+
+  - id: consul_gossip_key    # consul wants 32 random bytes, base64-encoded
+    type: base64
+    length: 32               # bytes BEFORE base64 encoding
+    immutable: true
+
+  - id: session_uuid
+    type: uuid               # UUID4; `length` is ignored
+
+  - id: hex_token
+    type: hex
+    length: 32               # bytes → 64 hex chars
+
+  - id: openssl_key          # arbitrary command, stdout is the value
+    type: cmd
+    command: "openssl rand -hex 24"
+
+  - id: existing_key         # not generated — operator must pre-populate
+    generate: false          # via .stackwiz.secrets.env or direct vault kv put
     vault_path: custom/path/existing_key   # override default
 ```
 
-Every secret is accessible to install scripts as `WIZ_SECRET_<ID>` and its Vault path as `WIZ_SECRET_<ID>_PATH`.
+**Supported `type:` values** (used only when `generate: true`):
+
+| Type | Output | `length:` means | Typical use |
+|---|---|---|---|
+| `password` *(default)* | random `[A-Za-z0-9]` string | output chars | admin logins, bearer tokens |
+| `hex` | random hex string | random bytes (output = 2×length) | API keys, session tokens |
+| `base64` | base64 of N random bytes | random bytes | Consul gossip key (`length: 32`), AES keys |
+| `uuid` | `uuid4()` | *(ignored)* | stable anonymous identifiers |
+| `cmd` | stdout of `command:` (trailing whitespace stripped) | *(ignored)* | anything else — `openssl`, `consul keygen`, custom scripts |
+
+`cmd` runs inside the stackwiz container with a 30-second timeout. Non-zero exit or empty stdout aborts the install with a clear error. If you need the command to run on the host instead of in the container, prefix it with `nsenter --target 1 --all --`.
+
+Every materialized secret is accessible to install scripts as `WIZ_SECRET_<ID>` and its Vault path as `WIZ_SECRET_<ID>_PATH`.
 
 ## Install script env contract
 
@@ -419,14 +449,37 @@ Option A is better for anything you want to reproduce. Option B is better when y
 
 ### Secrets overrides
 
-`.stackwiz.env` only handles **non-secret config values** (the `config:` section of the manifest). Secrets come from Vault — if you need to pre-seed a specific secret instead of having stackwiz generate it, use a secret with `generate: false` and pre-populate the Vault path via `vault kv put`:
+`.stackwiz.env` only handles **non-secret config values** (the `config:` section of the manifest). Secrets come from Vault. Any secret declared with `generate: false` must be supplied by the operator — stackwiz will not invent a value for it.
+
+There are two ways to supply one:
+
+**Option A — `.stackwiz.secrets.env`** (recommended for first-time installs, when Vault isn't up yet). `wizinstall init-env` scaffolds this file next to `.stackwiz.env` with one empty line per `generate: false` secret:
+
+```yaml
+# stackwiz user-supplied secrets for mystack v0.1.0
+#
+# Fill in values below, then run `wizinstall run`.
+# Filled entries are uploaded to Vault and REMOVED from this file,
+# so secrets do not linger on disk. Empty entries cause the run to
+# hard-error with the target Vault path.
+
+# Vault path: mycompany/admin_password
+admin_password: "hunter2"
+```
+
+On the next `wizinstall run`, every filled entry is `kv put` into Vault and then stripped from the file. Once every user-supplied secret has been uploaded, the file is deleted entirely. Re-running `init-env` regenerates the skeleton for anything still pending.
+
+Empty entries at run time hard-error with the key name and target Vault path, so you can either fill the file and retry or switch to Option B.
+
+**Option B — direct `vault kv put`** (for re-installs where Vault is already running):
 
 ```bash
-# Before the install run
 export VAULT_ADDR=http://127.0.0.1:8200
 export VAULT_TOKEN=$(sudo cat /var/lib/stackwiz/vault-token)
 vault kv put stackwiz/mycompany/admin_password value="existing-password"
 ```
+
+Either way, the manifest declaration is the same:
 
 ```yaml
 secrets:
@@ -434,6 +487,8 @@ secrets:
     generate: false            # stackwiz won't generate; operator-provided
     vault_path: mycompany/admin_password
 ```
+
+`.stackwiz.secrets.env` is written as `chmod 600`. Both `.stackwiz.env` and `.stackwiz.secrets.env` are added to the manifest-dir `.gitignore` automatically by `wizinstall init-env` (idempotent; existing entries are preserved). If you wrote those files by hand before running `init-env`, double-check `.gitignore` yourself.
 
 ## Idempotency guidelines
 
@@ -883,4 +938,5 @@ For end-to-end testing, vagrantfile + a real VM is the gold standard — see [`0
 - [`src/stackwiz/engine.py`](../src/stackwiz/engine.py) — install/upgrade/uninstall orchestrator.
 - [`src/stackwiz/executor.py`](../src/stackwiz/executor.py) — how scripts actually run (`bash -s` via `nsenter`).
 - [`src/stackwiz/share/stackwiz-tls.sh`](../src/stackwiz/share/stackwiz-tls.sh) — the TLS helper (adapted from `061/remote/nginx/generate-cert.sh`).
-- [`080.consul_vault_authentik`](https://github.com/ChistokhinSV/stackwiz/tree/main/../080.consul_vault_authentik) — end-to-end worked example: Consul + Vault + Authentik (with LDAPS) + nginx, self-bootstrapping on a single Debian 12 VM.
+- [`080.consul_vault_authentik`](https://github.com/ChistokhinSV/stackwiz/tree/main/../080.consul_vault_authentik) — lab-grade exemplar: Consul + Vault + Authentik (with LDAPS) self-bootstrapping on a single Debian 12 VM. Consul/Vault run as systemd binaries, Authentik via docker-compose, self-signed TLS.
+- [`081.consul_vault_authentik_docker`](https://github.com/ChistokhinSV/stackwiz/tree/main/../081.consul_vault_authentik_docker) — production-grade exemplar: everything in containers on a shared docker network. Consul with ACL+gossip, Vault with raft storage, Authentik 2025.12 (no Redis), nginx reverse proxy with Authentik ForwardAuth gating the Vault+Consul UIs, and a daily backup systemd timer. `auto` TLS mode tries Let's Encrypt first with self-signed fallback. Use this as the starting point for a real production deploy.

@@ -107,7 +107,13 @@ async def _run(
             print(f"[auto] forced refresh: {', '.join(sorted(forced_refresh))}")
         print(f"[auto] config: {config_values}")
         print("[auto] starting install")
-        failed = await _drive(engine.install(selected, config_values, forced_refresh))
+        try:
+            failed = await _drive(engine.install(selected, config_values, forced_refresh))
+        except RuntimeError as exc:
+            # Typically raised by materialize_secrets when a user-supplied
+            # secret is missing from both Vault and `.stackwiz.secrets.env`.
+            print(f"[auto] ERROR: {exc}", file=sys.stderr)
+            return 2
     else:
         if selected_override is not None:
             selected = set(selected_override)

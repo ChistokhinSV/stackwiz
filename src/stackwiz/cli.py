@@ -374,7 +374,60 @@ def init_env(
     except OSError:
         pass
     click.echo(f"wrote {target}")
+
+    from stackwiz.secrets_env import (
+        SECRETS_ENV_FILENAME,
+        load_secrets_env,
+        user_secret_specs,
+        write_secrets_env_scaffold,
+    )
+    user_specs = user_secret_specs(manifest)
+    if user_specs:
+        secrets_target = (manifest_dir / SECRETS_ENV_FILENAME).resolve()
+        existing_secrets = load_secrets_env(secrets_target)
+        write_secrets_env_scaffold(secrets_target, manifest, existing_secrets, user_specs)
+        click.echo(f"wrote {secrets_target}")
+
+    # Idempotently ensure both env files are gitignored. Consumers keep secrets
+    # in `.stackwiz.secrets.env` so it MUST never hit git — belt and braces.
+    entries = [".stackwiz.env", SECRETS_ENV_FILENAME]
+    added = _ensure_gitignore_entries(manifest_dir / ".gitignore", entries)
+    if added:
+        click.echo(
+            f"updated {manifest_dir / '.gitignore'}: added {', '.join(added)}"
+        )
+
     click.echo("Edit it and re-run `wizinstall run` to pick up the overrides.")
+
+
+def _ensure_gitignore_entries(path: Path, entries: list[str]) -> list[str]:
+    """Append missing `entries` to the gitignore at `path`. Returns what was added.
+
+    Creates the file if absent. Idempotent — existing entries (any form of
+    leading `./` or trailing whitespace) are recognized and skipped.
+    """
+    existing_lines: list[str] = []
+    existing_set: set[str] = set()
+    if path.exists():
+        existing_lines = path.read_text(encoding="utf-8").splitlines()
+        for line in existing_lines:
+            stripped = line.strip()
+            if stripped.startswith("./"):
+                stripped = stripped[2:]
+            elif stripped.startswith("/"):
+                stripped = stripped[1:]
+            if stripped:
+                existing_set.add(stripped)
+    missing = [e for e in entries if e not in existing_set]
+    if not missing:
+        return []
+    out = list(existing_lines)
+    if out and out[-1] != "":
+        out.append("")
+    out.extend(missing)
+    out.append("")
+    path.write_text("\n".join(out), encoding="utf-8")
+    return missing
 
 
 def _try_read_existing(path: Path) -> dict[str, object]:

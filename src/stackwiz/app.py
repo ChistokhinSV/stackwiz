@@ -116,7 +116,16 @@ class InstallerApp(App[int]):
         to the VAULT_TOKEN env var, which is typically empty on re-runs.
         """
         if self.consul_probe and self.consul_probe.reachable and self.consul_probe.address:
-            self.consul_client = ConsulClient(self.consul_probe.address)
+            # ACL-enabled consul needs a management token to register services;
+            # consumer install scripts (e.g. 081) persist it to this file.
+            consul_token_file = self.state_dir / "consul-http-token"
+            consul_token = (
+                consul_token_file.read_text().strip()
+                if consul_token_file.exists() else None
+            )
+            self.consul_client = ConsulClient(
+                self.consul_probe.address, token=consul_token
+            )
         if self.vault_probe and self.vault_probe.reachable and self.vault_probe.address:
             token_file = self.state_dir / "vault-token"
             token = token_file.read_text().strip() if token_file.exists() else None

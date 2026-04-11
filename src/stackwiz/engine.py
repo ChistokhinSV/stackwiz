@@ -19,6 +19,14 @@ from stackwiz.discovery import probe_consul, probe_vault
 from stackwiz.executor import Executor
 from stackwiz.manifest import Component, Manifest
 from stackwiz.secrets import MaterializedSecret, delete_secrets, materialize_secrets
+from stackwiz.secrets_env import (
+    SECRETS_ENV_FILENAME,
+    filled_entries,
+    load_secrets_env,
+    rewrite_after_upload,
+    secret_vault_path,
+    user_secret_specs,
+)
 from stackwiz.state import Action, State, component_config_hash
 from stackwiz.vault_client import VaultClient
 
@@ -98,6 +106,7 @@ class Engine:
         prefix = self.manifest.consul.service_prefix
         materialized: dict[str, MaterializedSecret] = {}
         if self.vault is not None:
+            self._upload_user_secrets()
             materialized = materialize_secrets(self.manifest, self.vault)
         result = EngineResult(secrets=materialized)
         self.last_run = result
@@ -125,7 +134,12 @@ class Engine:
             if component.id == "consul" and self.consul is None:
                 probe = await probe_consul(self.manifest.domain, self.manifest.consul_host)
                 if probe.reachable and probe.address:
-                    self.consul = ConsulClient(probe.address)
+                    # If consul.sh persisted an HTTP token (because ACLs are
+                    # default-deny), read it and pass to the ConsulClient so
+                    # the engine can register services for later components.
+                    token_file = self.state.state_dir / "consul-http-token"
+                    token = token_file.read_text().strip() if token_file.exists() else None
+                    self.consul = ConsulClient(probe.address, token=token)
                     log.info("consul adopted after install: %s", probe.address)
             if component.id == "vault" and self.vault is None:
                 probe = await probe_vault(self.manifest.domain, self.manifest.vault_host)
@@ -140,6 +154,7 @@ class Engine:
                         log.warning("vault kv mount failed: %s", exc)
                     if not materialized:
                         try:
+                            self._upload_user_secrets()
                             materialized = materialize_secrets(self.manifest, self.vault)
                             result.secrets = materialized
                             log.info("materialized %d secrets", len(materialized))
@@ -376,6 +391,41 @@ class Engine:
         del component
         return dict(config_values)
 
+    def _upload_user_secrets(self) -> None:
+        """Push filled `.stackwiz.secrets.env` entries to Vault, strip on success.
+
+        Unknown keys in the file (renamed/deleted manifest secrets) are skipped
+        and left in place so the operator can clean them up manually. Empty
+        entries stay in the file — `materialize_secrets` will surface them via
+        its missing-secret RuntimeError so the operator sees a clear pointer.
+        """
+        if self.vault is None:
+            return
+        path = self.executor.manifest_dir / SECRETS_ENV_FILENAME
+        values = load_secrets_env(path)
+        if not values:
+            return
+        specs_by_id = {s.id: s for s in user_secret_specs(self.manifest)}
+        uploaded: set[str] = set()
+        for sid, val in filled_entries(values).items():
+            spec = specs_by_id.get(sid)
+            if spec is None:
+                log.warning(
+                    "ignoring unknown key %r in %s (not in manifest.secrets)",
+                    sid, SECRETS_ENV_FILENAME,
+                )
+                continue
+            vault_path = secret_vault_path(self.manifest, spec)
+            try:
+                self.vault.kv_put(vault_path, {"value": val})
+            except Exception as exc:  # noqa: BLE001
+                log.warning("failed to upload %s to %s: %s", sid, vault_path, exc)
+                continue
+            uploaded.add(sid)
+            log.info("uploaded user-supplied secret %s → %s", sid, vault_path)
+        if uploaded:
+            rewrite_after_upload(path, self.manifest, uploaded)
+
     def _stage_host_helpers(self) -> None:
         """Copy bundled `share/` + manifest `templates/` to state_dir for host scripts.
 
@@ -429,3 +479,15 @@ class Engine:
                 exec_mode=False,
             )
             log.info("staged manifest templates at %s", self.state.host_path("templates"))
+
+        # Same for assets/: consumers can ship static files (brand logos,
+        # icons, config samples) that install scripts need to reference from
+        # the host's mount namespace.
+        manifest_assets = self.executor.manifest_dir / "assets"
+        if manifest_assets.is_dir():
+            _copy_dir(
+                manifest_assets,
+                self.state.state_dir / "assets",
+                exec_mode=False,
+            )
+            log.info("staged manifest assets at %s", self.state.host_path("assets"))

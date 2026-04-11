@@ -117,9 +117,34 @@ class Secret(BaseModel):
 
     id: str
     generate: bool = True
+    # `length` semantics depend on `type`:
+    #   password → output chars
+    #   hex      → random bytes (output = 2 × length chars)
+    #   base64   → random bytes (output length is base64 of those bytes)
+    #   uuid/cmd → ignored
     length: int = 32
+    type: Literal["password", "hex", "base64", "uuid", "cmd"] = "password"
+    command: str | None = None
     immutable: bool = False
     vault_path: str | None = None  # defaults to <service_prefix>/<id> if unset
+
+    @model_validator(mode="after")
+    def _type_contract(self) -> Secret:
+        if self.type == "cmd":
+            if not self.command:
+                raise ValueError(
+                    f"secret {self.id!r}: type=cmd requires a `command:` value"
+                )
+        elif self.command is not None:
+            raise ValueError(
+                f"secret {self.id!r}: `command:` is only valid with type=cmd "
+                f"(got type={self.type})"
+            )
+        if self.type in {"password", "hex", "base64"} and self.length <= 0:
+            raise ValueError(
+                f"secret {self.id!r}: length must be > 0 for type={self.type}"
+            )
+        return self
 
 
 class Manifest(BaseModel):
