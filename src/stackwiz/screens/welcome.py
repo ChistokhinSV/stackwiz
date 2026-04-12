@@ -79,21 +79,39 @@ class WelcomeScreen(Screen):
 
         if missing:
             component_ids = {c.id for c in manifest.components}
-            can_bootstrap = all(
-                name.lower() in component_ids for name in missing
-            )
-            if can_bootstrap:
+            # Check which missing backends are actually required
+            required_missing = []
+            for name in missing:
+                if name == "Consul" and not manifest.consul.required:
+                    continue
+                if name == "Vault":
+                    # Vault is required only if manifest has secrets
+                    if not manifest.secrets:
+                        continue
+                if name.lower() in component_ids:
+                    continue  # will be installed as a component
+                required_missing.append(name)
+
+            optional_missing = [m for m in missing if m not in required_missing]
+            can_bootstrap = [m for m in missing if m.lower() in component_ids]
+
+            if required_missing:
                 hint.update(
-                    f"[yellow]{', '.join(missing)} not reachable; will be installed "
+                    f"[red]{', '.join(required_missing)} not reachable and not in manifest. "
+                    f"Set env / DNS to point at reachable instances, then re-run.[/red]"
+                )
+                next_btn.disabled = True
+            elif can_bootstrap:
+                hint.update(
+                    f"[yellow]{', '.join(can_bootstrap)} not reachable; will be installed "
                     f"as components in this run.[/yellow]"
                 )
                 next_btn.disabled = False
             else:
                 hint.update(
-                    f"[red]{', '.join(missing)} not reachable and not in manifest. "
-                    f"Set env / DNS to point at reachable instances, then re-run.[/red]"
+                    f"[dim]{', '.join(optional_missing)} not available (optional).[/dim]"
                 )
-                next_btn.disabled = True
+                next_btn.disabled = False
         else:
             hint.update("[green]All backends reachable. Press Next to continue.[/green]")
             next_btn.disabled = False

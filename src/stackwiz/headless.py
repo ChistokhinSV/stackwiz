@@ -77,12 +77,16 @@ async def _run(
 
     component_ids = {c.id for c in manifest.components}
     if mode == "install":
-        needed = {"consul", "vault"}
-        missing_backends = [name for name in needed if name not in component_ids]
-        if (not consul_probe.reachable or not vault_probe.reachable) and missing_backends:
+        # Only block if a REQUIRED backend is missing and not installable
+        required_missing = []
+        if not consul_probe.reachable and manifest.consul.required and "consul" not in component_ids:
+            required_missing.append("consul")
+        if not vault_probe.reachable and manifest.secrets and "vault" not in component_ids:
+            required_missing.append("vault")
+        if required_missing:
             print(
-                "[auto] ERROR: backends not reachable and not in manifest: "
-                f"{', '.join(missing_backends)}",
+                "[auto] ERROR: required backends not reachable and not in manifest: "
+                f"{', '.join(required_missing)}",
                 file=sys.stderr,
             )
             return 2
