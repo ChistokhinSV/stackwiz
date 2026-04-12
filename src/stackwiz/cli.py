@@ -391,26 +391,6 @@ def init_env(
             lines.append(f"# {yaml_line}")
         lines.append("")
 
-    # If the manifest uses TLS, hint at the DNS API credentials that
-    # bootstrap.sh passes through as env vars (not config fields).
-    tls_ids = {f.id for f in manifest.config}
-    if tls_ids & {"tls_mode", "certbot_email"}:
-        lines.append("# ---- TLS / Let's Encrypt credentials (environment variables) ----")
-        lines.append("# These are NOT stackwiz config fields. Set them in your shell or")
-        lines.append("# source a .env file BEFORE running bootstrap.sh.")
-        lines.append("#")
-        lines.append("# Cloudflare DNS-01 (fastest, recommended):")
-        lines.append('#   export CF_DNS_API_TOKEN="<your cloudflare api token>"')
-        lines.append("#")
-        lines.append("# AWS Route53 DNS-01:")
-        lines.append('#   export AWS_DNS_ACCESS_KEY_ID="<key>"')
-        lines.append('#   export AWS_DNS_SECRET_ACCESS_KEY="<secret>"')
-        lines.append("#")
-        lines.append("# certbot_email (above) is used as the LE registration email.")
-        lines.append("# If no DNS credentials are set and tls_mode is 'auto', the helper")
-        lines.append("# falls back to self-signed certs.")
-        lines.append("")
-
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("\n".join(lines), encoding="utf-8")
     try:
@@ -432,9 +412,17 @@ def init_env(
         write_secrets_env_scaffold(secrets_target, manifest, existing_secrets, user_specs)
         click.echo(f"wrote {secrets_target}")
 
-    # Idempotently ensure both env files are gitignored. Consumers keep secrets
-    # in `.stackwiz.secrets.env` so it MUST never hit git — belt and braces.
-    entries = [".stackwiz.env", SECRETS_ENV_FILENAME]
+    # Generate .env (shell-style KEY=VALUE) for TLS / DNS API credentials
+    # that bootstrap.sh passes through as docker -e flags.
+    tls_ids = {f.id for f in manifest.config}
+    if tls_ids & {"tls_mode", "certbot_email"}:
+        dot_env = manifest_dir / ".env"
+        if not dot_env.exists() or force:
+            _write_dot_env(dot_env)
+            click.echo(f"wrote {dot_env}")
+
+    # Idempotently ensure all env files are gitignored.
+    entries = [".stackwiz.env", SECRETS_ENV_FILENAME, ".env"]
     added = _ensure_gitignore_entries(manifest_dir / ".gitignore", entries)
     if added:
         click.echo(
@@ -483,6 +471,35 @@ def _try_read_existing(path: Path) -> dict[str, object]:
         return data if isinstance(data, dict) else {}
     except Exception:  # noqa: BLE001
         return {}
+
+
+def _write_dot_env(path: Path) -> None:
+    """Write a .env scaffold with TLS / DNS API credential placeholders.
+
+    bootstrap.sh sources this file so the operator fills it once and the
+    credentials persist across runs without exporting in their shell.
+    """
+    content = """\
+# stackwiz bootstrap credentials
+# Fill the credentials you need; bootstrap.sh sources this file automatically.
+# This file is gitignored — it contains secrets.
+
+# ---- TLS / Let's Encrypt DNS challenge credentials ----
+# Uncomment ONE provider block. If none are set and tls_mode is "auto",
+# the TLS helper falls back to self-signed certificates.
+
+# Cloudflare DNS-01 (fastest, recommended):
+#CF_DNS_API_TOKEN=
+
+# AWS Route53 DNS-01:
+#AWS_DNS_ACCESS_KEY_ID=
+#AWS_DNS_SECRET_ACCESS_KEY=
+"""
+    path.write_text(content, encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
 
 
 def _yaml_line(key: str, value: object) -> str:
