@@ -52,7 +52,12 @@ class ProgressScreen(Screen):
 
     def on_mount(self) -> None:
         table = self.query_one("#progress-table", DataTable)
-        table.add_columns("status", "component", "action", "message")
+        # Explicit key= so update_cell("status", ...) matches the column.
+        # add_columns() auto-generates keys that DON'T match the label string.
+        table.add_column("status", key="status")
+        table.add_column("component", key="component")
+        table.add_column("action", key="action")
+        table.add_column("message", key="message")
         for component in self.installer.manifest.topo_order():
             table.add_row(
                 STATUS_ICON[Status.PENDING],
