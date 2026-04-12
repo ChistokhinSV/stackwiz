@@ -29,6 +29,7 @@ class ConsulService(BaseModel):
     name: str
     port: int
     tags: list[str] = Field(default_factory=list)
+    meta: dict[str, str] = Field(default_factory=dict)
     check: ConsulServiceCheck | None = None
 
 

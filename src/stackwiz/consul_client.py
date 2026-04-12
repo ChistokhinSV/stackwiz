@@ -70,6 +70,7 @@ class ConsulClient:
             address=node_address,
             port=svc.port,
             tags=list(svc.tags),
+            meta=dict(svc.meta) if svc.meta else None,
             check=check,
         )
 
