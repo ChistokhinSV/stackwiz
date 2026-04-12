@@ -367,7 +367,7 @@ class Engine:
         env.update(component.env)
 
         for key, value in config_values.items():
-            env[f"WIZ_CFG_{key.upper()}"] = str(value)
+            env[f"WIZ_CFG_{key.upper()}"] = str(value).lower() if isinstance(value, bool) else str(value)
 
         for secret_id, info in materialized.items():
             env[f"WIZ_SECRET_{secret_id.upper()}"] = info.value
