@@ -119,10 +119,12 @@ def collect(
             immutable=spec.immutable,
         ))
 
+    effective_domain = state.config().get("domain", manifest.domain) or manifest.domain
+
     return ReportData(
         manifest_name=manifest.display_name,
         manifest_version=manifest.version,
-        domain=manifest.domain,
+        domain=effective_domain,
         components=components,
         secrets=secrets,
         config=state.config(),
@@ -305,14 +307,17 @@ def render_info(
     import asyncio
 
     state = State(state_dir)
+    effective_domain = state.config().get("domain", manifest.domain) or manifest.domain
     consul_client: ConsulClient | None = None
     vault_client: VaultClient | None = None
 
-    consul_probe = asyncio.run(probe_consul(manifest.domain, manifest.consul_host))
+    consul_probe = asyncio.run(probe_consul(effective_domain, manifest.consul_host))
     if consul_probe.reachable and consul_probe.address:
-        consul_client = ConsulClient(consul_probe.address)
+        token_file = state_dir / "consul-http-token"
+        token = token_file.read_text().strip() if token_file.exists() else None
+        consul_client = ConsulClient(consul_probe.address, token=token)
 
-    vault_probe = asyncio.run(probe_vault(manifest.domain, manifest.vault_host))
+    vault_probe = asyncio.run(probe_vault(effective_domain, manifest.vault_host))
     if vault_probe.reachable and vault_probe.address:
         token_file = state_dir / "vault-token"
         token = token_file.read_text().strip() if token_file.exists() else None
