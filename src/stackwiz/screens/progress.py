@@ -122,6 +122,7 @@ class ProgressScreen(Screen):
             table.update_cell(event.component_id, "action", event.action.value)
             if event.message:
                 table.update_cell(event.component_id, "message", event.message)
+            table.refresh()
         except Exception:  # noqa: BLE001 — row may not exist yet for bootstrap injection
             pass
 
