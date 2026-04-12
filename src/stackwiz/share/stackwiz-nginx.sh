@@ -123,22 +123,7 @@ _stackwiz_nginx_ensure_container() {
     if [ ! -f "${STACKWIZ_NGINX_COMPOSE}" ]; then
         _stackwiz_nginx_write_compose
     fi
-    # Temporarily hide consumer configs that might reference missing certs
-    # (from a previous partial run). Start with just the default conf, then
-    # consumers re-add their configs and call reload.
-    local stash="${STACKWIZ_NGINX_DIR}/.stash"
-    mkdir -p "${stash}"
-    for f in "${STACKWIZ_NGINX_DIR}/conf.d"/*--*.conf; do
-        [ -f "$f" ] && mv "$f" "${stash}/"
-    done
     docker compose -f "${STACKWIZ_NGINX_COMPOSE}" up -d
-    # Restore stashed configs — the consumer's install script will overwrite
-    # them with fresh renders anyway, but keeping them means a re-run after
-    # a clean reboot picks up where it left off.
-    for f in "${stash}"/*.conf; do
-        [ -f "$f" ] && mv "$f" "${STACKWIZ_NGINX_DIR}/conf.d/"
-    done
-    rmdir "${stash}" 2>/dev/null || true
 }
 
 _stackwiz_nginx_teardown() {
