@@ -118,13 +118,27 @@ _stackwiz_nginx_ensure_container() {
     if docker ps --format '{{.Names}}' | grep -qxF "${STACKWIZ_NGINX_CONTAINER}"; then
         return 0
     fi
-    # Remove stale container (e.g. referencing a deleted network) so
-    # compose recreates it cleanly.
+    # Remove stale container (e.g. referencing a deleted network).
     docker rm -f "${STACKWIZ_NGINX_CONTAINER}" 2>/dev/null || true
     if [ ! -f "${STACKWIZ_NGINX_COMPOSE}" ]; then
         _stackwiz_nginx_write_compose
     fi
+    # Temporarily hide consumer configs that might reference missing certs
+    # (from a previous partial run). Start with just the default conf, then
+    # consumers re-add their configs and call reload.
+    local stash="${STACKWIZ_NGINX_DIR}/.stash"
+    mkdir -p "${stash}"
+    for f in "${STACKWIZ_NGINX_DIR}/conf.d"/*--*.conf; do
+        [ -f "$f" ] && mv "$f" "${stash}/"
+    done
     docker compose -f "${STACKWIZ_NGINX_COMPOSE}" up -d
+    # Restore stashed configs — the consumer's install script will overwrite
+    # them with fresh renders anyway, but keeping them means a re-run after
+    # a clean reboot picks up where it left off.
+    for f in "${stash}"/*.conf; do
+        [ -f "$f" ] && mv "$f" "${STACKWIZ_NGINX_DIR}/conf.d/"
+    done
+    rmdir "${stash}" 2>/dev/null || true
 }
 
 _stackwiz_nginx_teardown() {
@@ -184,9 +198,18 @@ stackwiz_nginx_add_cert() {
 }
 
 stackwiz_nginx_reload() {
+    # If the container died (e.g. stale config on startup), restart it.
+    if ! docker ps --format '{{.Names}}' | grep -qxF "${STACKWIZ_NGINX_CONTAINER}"; then
+        echo "stackwiz-nginx: container not running — restarting"
+        if [ -f "${STACKWIZ_NGINX_COMPOSE}" ]; then
+            docker compose -f "${STACKWIZ_NGINX_COMPOSE}" up -d --force-recreate
+        fi
+        sleep 1
+    fi
     # Validate config first — fail loudly so callers' set -e catches it.
     if ! docker exec "${STACKWIZ_NGINX_CONTAINER}" nginx -t 2>&1; then
         echo "stackwiz-nginx: config test FAILED — reload skipped" >&2
+        docker logs --tail 20 "${STACKWIZ_NGINX_CONTAINER}" >&2 || true
         return 1
     fi
     docker exec "${STACKWIZ_NGINX_CONTAINER}" nginx -s reload
