@@ -391,6 +391,26 @@ def init_env(
             lines.append(f"# {yaml_line}")
         lines.append("")
 
+    # If the manifest uses TLS, hint at the DNS API credentials that
+    # bootstrap.sh passes through as env vars (not config fields).
+    tls_ids = {f.id for f in manifest.config}
+    if tls_ids & {"tls_mode", "certbot_email"}:
+        lines.append("# ---- TLS / Let's Encrypt credentials (environment variables) ----")
+        lines.append("# These are NOT stackwiz config fields. Set them in your shell or")
+        lines.append("# source a .env file BEFORE running bootstrap.sh.")
+        lines.append("#")
+        lines.append("# Cloudflare DNS-01 (fastest, recommended):")
+        lines.append('#   export CF_DNS_API_TOKEN="<your cloudflare api token>"')
+        lines.append("#")
+        lines.append("# AWS Route53 DNS-01:")
+        lines.append('#   export AWS_DNS_ACCESS_KEY_ID="<key>"')
+        lines.append('#   export AWS_DNS_SECRET_ACCESS_KEY="<secret>"')
+        lines.append("#")
+        lines.append("# certbot_email (above) is used as the LE registration email.")
+        lines.append("# If no DNS credentials are set and tls_mode is 'auto', the helper")
+        lines.append("# falls back to self-signed certs.")
+        lines.append("")
+
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("\n".join(lines), encoding="utf-8")
     try:

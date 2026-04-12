@@ -1,0 +1,26 @@
+services:
+  nginx:
+    image: nginxinc/nginx-unprivileged:alpine
+    container_name: stackwiz-nginx
+    restart: unless-stopped
+    volumes:
+      - /opt/stackwiz/nginx/conf.d:/etc/nginx/conf.d:ro
+      - /opt/stackwiz/nginx/tls:/etc/nginx/tls:ro
+    ports:
+      - "80:8080"
+      - "443:8443"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+networks:
+  default:
+    name: stackwiz-shared
