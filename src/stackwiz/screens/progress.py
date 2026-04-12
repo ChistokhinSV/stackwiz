@@ -101,8 +101,17 @@ class ProgressScreen(Screen):
 
     def _apply_event(self, table: DataTable, log_widget: RichLog, event: StepEvent) -> None:
         if event.line is not None:
-            prefix = "err " if event.stream == "stderr" else "    "
+            prefix = "ERR " if event.stream == "stderr" else "    "
             log_widget.write(f"{prefix}[{event.component_id}] {event.line}")
+            # Mirror the latest output line into the DataTable message column
+            # so the operator sees progress at a glance (e.g. "Downloading 80MB"
+            # during a docker pull) without watching the log scroll.
+            snippet = event.line.strip()[:60]
+            if snippet:
+                try:
+                    table.update_cell(event.component_id, "message", snippet)
+                except Exception:  # noqa: BLE001
+                    pass
             return
 
         if event.status is Status.FAILED:
