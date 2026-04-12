@@ -50,14 +50,15 @@ fi
 
 sudo mkdir -p "${STATE_DIR}"
 
-if ! sudo docker image inspect "${STACKWIZ_IMAGE}" >/dev/null 2>&1; then
-  if ! sudo docker pull "${STACKWIZ_IMAGE}" 2>/dev/null; then
-    echo "warn: ${STACKWIZ_IMAGE} not available in registry; expecting a local build" >&2
-    if ! sudo docker image inspect "${STACKWIZ_IMAGE}" >/dev/null 2>&1; then
-      echo "error: image not found locally either" >&2
-      exit 1
-    fi
-  fi
+# Always try to pull the latest image. If the registry is unreachable,
+# fall back to whatever is cached locally.
+if sudo docker pull "${STACKWIZ_IMAGE}" 2>/dev/null; then
+  echo "[bootstrap] image up to date"
+elif sudo docker image inspect "${STACKWIZ_IMAGE}" >/dev/null 2>&1; then
+  echo "[bootstrap] registry unreachable; using cached image" >&2
+else
+  echo "error: image not found locally or in registry" >&2
+  exit 1
 fi
 
 headless=0
