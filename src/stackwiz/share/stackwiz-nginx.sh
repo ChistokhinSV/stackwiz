@@ -182,6 +182,98 @@ stackwiz_nginx_add_cert() {
     install -m 0644 "${key}"  "${STACKWIZ_NGINX_DIR}/tls/${host}.key"
 }
 
+stackwiz_nginx_add_proxy() {
+    # High-level: generate a standard TLS reverse proxy vhost.
+    # Usage: stackwiz_nginx_add_proxy <ns> <pri> <name> <hostname> <upstream>
+    # Example: stackwiz_nginx_add_proxy "082" "00" "backup" "backup.example.com" "http://oxidized:8888"
+    local ns="${1:?}" pri="${2:?}" name="${3:?}" hostname="${4:?}" upstream="${5:?}"
+    local max_body="${6:-50M}"
+    cat <<EOF | stackwiz_nginx_add_conf "${ns}" "${pri}" "${name}"
+server {
+    listen 8443 ssl;
+    http2 on;
+    server_name ${hostname};
+
+    ssl_certificate     /etc/nginx/tls/${hostname}.crt;
+    ssl_certificate_key /etc/nginx/tls/${hostname}.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    client_max_body_size ${max_body};
+    resolver 127.0.0.11 valid=10s ipv6=off;
+    set \$backend ${upstream};
+
+    location / {
+        proxy_pass              \$backend;
+        proxy_set_header        Host \$host;
+        proxy_set_header        X-Real-IP \$remote_addr;
+        proxy_set_header        X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header        X-Forwarded-Proto \$scheme;
+        proxy_http_version      1.1;
+        proxy_set_header        Upgrade \$http_upgrade;
+        proxy_set_header        Connection "upgrade";
+    }
+}
+EOF
+}
+
+stackwiz_nginx_add_forwardauth_proxy() {
+    # High-level: generate a TLS vhost gated by Authentik ForwardAuth.
+    # Usage: stackwiz_nginx_add_forwardauth_proxy <ns> <pri> <name> <hostname> <upstream> [authentik_proxy_url]
+    local ns="${1:?}" pri="${2:?}" name="${3:?}" hostname="${4:?}" upstream="${5:?}"
+    local auth_proxy="${6:-http://authentik-proxy:9000}"
+    cat <<EOF | stackwiz_nginx_add_conf "${ns}" "${pri}" "${name}"
+server {
+    listen 8443 ssl;
+    http2 on;
+    server_name ${hostname};
+
+    ssl_certificate     /etc/nginx/tls/${hostname}.crt;
+    ssl_certificate_key /etc/nginx/tls/${hostname}.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    resolver 127.0.0.11 valid=10s ipv6=off;
+    set \$backend_proxy ${auth_proxy};
+    set \$backend_upstream ${upstream};
+
+    location /outpost.goauthentik.io {
+        proxy_pass              \$backend_proxy/outpost.goauthentik.io;
+        proxy_set_header        Host \$host;
+        proxy_set_header        X-Original-URL \$scheme://\$http_host\$request_uri;
+        add_header              Set-Cookie \$auth_cookie;
+        auth_request_set        \$auth_cookie \$upstream_http_set_cookie;
+        proxy_pass_request_body off;
+        proxy_set_header        Content-Length "";
+    }
+
+    location / {
+        auth_request            /outpost.goauthentik.io/auth/nginx;
+        error_page              401 = @goauthentik_proxy_signin;
+        auth_request_set        \$auth_cookie \$upstream_http_set_cookie;
+        add_header              Set-Cookie \$auth_cookie;
+        auth_request_set        \$authentik_username \$upstream_http_x_authentik_username;
+        auth_request_set        \$authentik_groups   \$upstream_http_x_authentik_groups;
+        auth_request_set        \$authentik_email    \$upstream_http_x_authentik_email;
+        proxy_set_header        X-authentik-username \$authentik_username;
+        proxy_set_header        X-authentik-groups   \$authentik_groups;
+        proxy_set_header        X-authentik-email    \$authentik_email;
+
+        proxy_pass              \$backend_upstream;
+        proxy_set_header        Host \$host;
+        proxy_set_header        X-Real-IP \$remote_addr;
+        proxy_set_header        X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header        X-Forwarded-Proto \$scheme;
+        proxy_ssl_verify        off;
+    }
+
+    location @goauthentik_proxy_signin {
+        internal;
+        add_header              Set-Cookie \$auth_cookie;
+        return                  302 /outpost.goauthentik.io/start?rd=\$request_uri;
+    }
+}
+EOF
+}
+
 stackwiz_nginx_reload() {
     # If the container died (e.g. stale config on startup), restart it.
     if ! docker ps --format '{{.Names}}' | grep -qxF "${STACKWIZ_NGINX_CONTAINER}"; then
