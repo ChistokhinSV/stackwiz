@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+#
+# Bootstraps the stackwiz installer on this host.
+#
+# Copy this file to your consumer project as `bootstrap.sh` and customise
+# the environment variables passed to the container (the -e flags in
+# run_container).
+#
+# Env vars:
+#   STACKWIZ_IMAGE     container image to run (default: ghcr.io/chistokhinsv/stackwiz:latest)
+#   STACKWIZ_STATE_DIR host state directory (default: /var/lib/stackwiz)
+#
+set -euo pipefail
+
+# --- Prerequisites ---
+missing=()
+for cmd in curl sudo; do
+  command -v "$cmd" >/dev/null || missing+=("$cmd")
+done
+if [ ${#missing[@]} -gt 0 ]; then
+  echo "error: missing required commands: ${missing[*]}" >&2
+  echo "       install them first (e.g. apt-get install -y ${missing[*]})" >&2
+  exit 1
+fi
+
+STACKWIZ_IMAGE="${STACKWIZ_IMAGE:-ghcr.io/chistokhinsv/stackwiz:latest}"
+STATE_DIR="${STACKWIZ_STATE_DIR:-/var/lib/stackwiz}"
+
+if ! command -v docker >/dev/null; then
+  echo "[bootstrap] installing Docker..."
+  curl -fsSL https://get.docker.com | sudo sh
+fi
+
+sudo mkdir -p "${STATE_DIR}"
+
+if ! sudo docker image inspect "${STACKWIZ_IMAGE}" >/dev/null 2>&1; then
+  if ! sudo docker pull "${STACKWIZ_IMAGE}" 2>/dev/null; then
+    echo "warn: ${STACKWIZ_IMAGE} not available in registry; expecting a local build" >&2
+    if ! sudo docker image inspect "${STACKWIZ_IMAGE}" >/dev/null 2>&1; then
+      echo "error: image not found locally either" >&2
+      exit 1
+    fi
+  fi
+fi
+
+headless=0
+writable_manifest=0
+for arg in "$@"; do
+  case "$arg" in
+    --auto|--validate|validate|list|info|init-env) headless=1 ;;
+  esac
+  case "$arg" in
+    init-env) writable_manifest=1 ;;
+  esac
+done
+if [ "${headless}" -eq 1 ]; then
+  docker_flags=(--rm)
+else
+  docker_flags=(--rm -it)
+fi
+
+if [ "${writable_manifest}" -eq 1 ]; then
+  manifest_mount="$PWD:/manifest"
+else
+  manifest_mount="$PWD:/manifest:ro"
+fi
+
+run_container() {
+  sudo docker run "${docker_flags[@]}" \
+    --privileged --pid=host --network=host \
+    -v "${manifest_mount}" \
+    -v "${STATE_DIR}:/state" \
+    -e CONSUL_HTTP_ADDR="${CONSUL_HTTP_ADDR:-}" \
+    -e VAULT_ADDR="${VAULT_ADDR:-}" \
+    -e VAULT_TOKEN="${VAULT_TOKEN:-}" \
+    -e STACKWIZ_HOST_STATE_DIR="${STATE_DIR}" \
+    "${STACKWIZ_IMAGE}" "$@"
+}
+
+run_container "$@"
+rc=$?
+
+if [ "${writable_manifest}" -eq 1 ] && [ -f "$PWD/.stackwiz.env" ]; then
+  sudo chown "$(id -u):$(id -g)" "$PWD/.stackwiz.env" 2>/dev/null || true
+fi
+exit "${rc}"
