@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
 import hvac
+import urllib3
+
+# Vault uses self-signed certs on localhost; suppress noisy TLS warnings.
+warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
 
 KV_MOUNT = "stackwiz"
 UNSEAL_SHARES = 5

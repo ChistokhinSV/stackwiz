@@ -10,12 +10,16 @@ An explicit env override (CONSUL_HTTP_ADDR / VAULT_ADDR) always wins.
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass
 from enum import StrEnum
 
 import dns.exception
 import dns.resolver
 import httpx
+import urllib3
+
+warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
 
 CONSUL_DEFAULT_PORT = 8500
 VAULT_DEFAULT_PORT = 8200
