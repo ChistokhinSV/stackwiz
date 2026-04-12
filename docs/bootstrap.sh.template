@@ -18,9 +18,16 @@ if ! command -v sudo >/dev/null; then
   echo "       run as root: apt-get install -y sudo" >&2
   exit 1
 fi
-if ! command -v curl >/dev/null; then
-  echo "[bootstrap] installing curl..."
-  sudo apt-get update -qq && sudo apt-get install -y -qq curl ca-certificates
+# Adjust this list to match what your install/*.sh scripts need.
+needed=()
+command -v curl     >/dev/null || needed+=(curl ca-certificates)
+command -v jq       >/dev/null || needed+=(jq)
+command -v openssl  >/dev/null || needed+=(openssl)
+command -v envsubst >/dev/null || needed+=(gettext-base)
+command -v python3  >/dev/null || needed+=(python3)
+if [ ${#needed[@]} -gt 0 ]; then
+  echo "[bootstrap] installing host dependencies: ${needed[*]}"
+  sudo apt-get update -qq && sudo apt-get install -y -qq "${needed[@]}"
 fi
 
 STACKWIZ_IMAGE="${STACKWIZ_IMAGE:-ghcr.io/chistokhinsv/stackwiz:latest}"
