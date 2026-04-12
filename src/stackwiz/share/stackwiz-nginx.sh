@@ -118,6 +118,9 @@ _stackwiz_nginx_ensure_container() {
     if docker ps --format '{{.Names}}' | grep -qxF "${STACKWIZ_NGINX_CONTAINER}"; then
         return 0
     fi
+    # Remove stale container (e.g. referencing a deleted network) so
+    # compose recreates it cleanly.
+    docker rm -f "${STACKWIZ_NGINX_CONTAINER}" 2>/dev/null || true
     if [ ! -f "${STACKWIZ_NGINX_COMPOSE}" ]; then
         _stackwiz_nginx_write_compose
     fi
