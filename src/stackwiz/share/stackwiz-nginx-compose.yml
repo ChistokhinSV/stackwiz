@@ -3,6 +3,8 @@ services:
     image: nginxinc/nginx-unprivileged:alpine
     container_name: stackwiz-nginx
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - /opt/stackwiz/nginx/conf.d:/etc/nginx/conf.d:ro
       - /opt/stackwiz/nginx/tls:/etc/nginx/tls:ro
