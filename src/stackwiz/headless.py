@@ -79,7 +79,8 @@ async def _run(
     if mode == "install":
         # Only block if a REQUIRED backend is missing and not installable
         required_missing = []
-        if not consul_probe.reachable and manifest.consul.required and "consul" not in component_ids:
+        consul_needed = manifest.consul.required and "consul" not in component_ids
+        if not consul_probe.reachable and consul_needed:
             required_missing.append("consul")
         if not vault_probe.reachable and manifest.secrets and "vault" not in component_ids:
             required_missing.append("vault")

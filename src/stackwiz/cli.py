@@ -14,6 +14,7 @@ the specified components.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -21,6 +22,25 @@ import click
 
 from stackwiz import __version__
 from stackwiz.manifest import Component, Manifest, load_manifest
+
+
+def _resolve_state_dir(base: Path, manifest: Manifest) -> Path:
+    """Namespace state by manifest name to prevent multi-stack collisions.
+
+    Returns ``base / manifest.name`` so each consumer gets its own
+    ``installed.yaml``, ``install.log``, ``summary.md``, etc.
+
+    Backward compat: if a flat ``installed.yaml`` already sits at *base*
+    (pre-namespace layout) and the namespaced dir has none yet, keep using
+    the flat path so existing single-stack installs aren't broken.
+    """
+    namespaced = base / manifest.name
+    if (base / "installed.yaml").exists() and not (namespaced / "installed.yaml").exists():
+        return base
+    host_base = os.environ.get("STACKWIZ_HOST_STATE_DIR")
+    if host_base:
+        os.environ["STACKWIZ_HOST_STATE_DIR"] = str(Path(host_base) / manifest.name)
+    return namespaced
 
 
 def _shared_opts(func):
@@ -126,6 +146,7 @@ def run(
     set in the script env.
     """
     manifest = _load(manifest_path)
+    state_dir = _resolve_state_dir(state_dir, manifest)
     state_dir.mkdir(parents=True, exist_ok=True)
     manifest_dir = manifest_path.parent.resolve()
     selected_override: set[str] | None = None
@@ -168,6 +189,7 @@ def refresh(
     Equivalent to `wizinstall run --force [COMPONENTS...]`.
     """
     manifest = _load(manifest_path)
+    state_dir = _resolve_state_dir(state_dir, manifest)
     state_dir.mkdir(parents=True, exist_ok=True)
     manifest_dir = manifest_path.parent.resolve()
 
@@ -217,6 +239,7 @@ def uninstall(
     order within the selection).
     """
     manifest = _load(manifest_path)
+    state_dir = _resolve_state_dir(state_dir, manifest)
     state_dir.mkdir(parents=True, exist_ok=True)
     manifest_dir = manifest_path.parent.resolve()
     selected_override: set[str] | None = None
@@ -249,6 +272,7 @@ def list_cmd(manifest_path: Path, state_dir: Path) -> None:
     """
     from stackwiz.state import State
     manifest = _load(manifest_path)
+    state_dir = _resolve_state_dir(state_dir, manifest)
     state_dir.mkdir(parents=True, exist_ok=True)
     state = State(state_dir)
     installed = state.installed()
@@ -472,6 +496,7 @@ def info(
 ) -> None:
     """Show installed components, URLs, and secret paths."""
     manifest = _load(manifest_path)
+    state_dir = _resolve_state_dir(state_dir, manifest)
     state_dir.mkdir(parents=True, exist_ok=True)
     from stackwiz.info import render_info
 
