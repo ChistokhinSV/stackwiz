@@ -139,7 +139,13 @@ secrets:
   - id: existing_key         # not generated — operator must pre-populate
     generate: false          # via .stackwiz.secrets.env or direct vault kv put
     vault_path: custom/path/existing_key   # override default
+
+  - id: optional_api_key    # not generated, but OK if missing
+    generate: false
+    optional: true           # empty value used if not supplied — no hard error
 ```
+
+**`optional: true`** on a `generate: false` secret means "nice to have". If the operator doesn't supply a value, the engine logs a warning and passes an empty string to install scripts via `WIZ_SECRET_*`. The `.stackwiz.secrets.env` scaffold marks these with "(optional — leave empty to skip)".
 
 **Supported `type:` values** (used only when `generate: true`):
 

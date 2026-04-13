@@ -131,6 +131,19 @@ def materialize_secrets(
             )
             continue
         if not spec.generate:
+            if spec.optional:
+                log.info(
+                    "optional secret %r not set — using empty value "
+                    "(fill %s or Vault path %s to enable)",
+                    spec.id, SECRETS_ENV_FILENAME, vault_path,
+                )
+                results[spec.id] = MaterializedSecret(
+                    id=spec.id,
+                    vault_path=vault_path,
+                    value="",
+                    regenerated=False,
+                )
+                continue
             raise RuntimeError(
                 f"secret {spec.id!r} is missing at Vault path {vault_path!r} "
                 f"and generate=false. Fill `{SECRETS_ENV_FILENAME}` next to "

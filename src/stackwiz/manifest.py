@@ -127,6 +127,7 @@ class Secret(BaseModel):
     type: Literal["password", "hex", "base64", "uuid", "cmd"] = "password"
     command: str | None = None
     immutable: bool = False
+    optional: bool = False  # if True and generate=False, missing value is OK (empty string)
     vault_path: str | None = None  # defaults to <service_prefix>/<id> if unset
 
     @model_validator(mode="after")
