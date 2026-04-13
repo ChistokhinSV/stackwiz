@@ -12,10 +12,10 @@ services:
       - "80:8080"
       - "443:8443"
     logging:
-      driver: json-file
+      driver: gelf
       options:
-        max-size: "10m"
-        max-file: "5"
+        gelf-address: "udp://127.0.0.1:12201"
+        tag: "{{.Name}}"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
       interval: 15s
