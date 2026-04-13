@@ -124,8 +124,14 @@ class ProgressScreen(Screen):
         if event.status is Status.FAILED:
             self._failed = True
 
+        # Echo status transitions to the RichLog so they appear in the
+        # scrollable history (table only shows the current state).
+        icon = STATUS_ICON.get(event.status, "?")
+        msg = event.message or event.action.value
+        log_widget.write(f"  {icon} [{event.component_id}] {msg}")
+
         try:
-            table.update_cell(event.component_id, "status", STATUS_ICON[event.status])
+            table.update_cell(event.component_id, "status", icon)
             table.update_cell(event.component_id, "action", event.action.value)
             if event.message:
                 table.update_cell(event.component_id, "message", event.message)
