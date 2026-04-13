@@ -507,3 +507,15 @@ class Engine:
                 exec_mode=False,
             )
             log.info("staged manifest assets at %s", self.state.host_path("assets"))
+
+        # Stage any top-level directories that install scripts need for docker
+        # build contexts (e.g. mcp/ for MCP server containers).
+        for extra in ("mcp",):
+            extra_dir = self.executor.manifest_dir / extra
+            if extra_dir.is_dir():
+                _copy_dir(
+                    extra_dir,
+                    self.state.state_dir / extra,
+                    exec_mode=False,
+                )
+                log.info("staged %s at %s", extra, self.state.host_path(extra))
