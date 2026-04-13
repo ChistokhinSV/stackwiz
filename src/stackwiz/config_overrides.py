@@ -13,7 +13,7 @@ operator edits the env file post-install.
 After merging, every string value is `${id}`-substituted against the merged
 map. That lets consumer manifests declare
 
-    domain: "stackwiz.lab"
+    domain: "example.com"
     config:
       - id: authentik_hostname
         default: "auth.${domain}"
@@ -76,7 +76,7 @@ def _recursive_interpolate(values: dict[str, Any], max_depth: int = 4) -> dict[s
 
 
 def _domain_to_dn(domain: str) -> str:
-    """`example.lab` → `dc=example,dc=lab`. Empty string → empty."""
+    """`example.com` → `dc=example,dc=com`. Empty string → empty."""
     parts = [p for p in domain.split(".") if p]
     return ",".join(f"dc={p}" for p in parts)
 
@@ -105,7 +105,7 @@ def effective_config(
 
     # Apply state cache, but SKIP any field whose manifest default is a
     # template (contains `${...}`). State stores fully-resolved values from
-    # prior runs, so a cached `authentik_hostname: auth.stackwiz.lab` would
+    # prior runs, so a cached `authentik_hostname: auth.example.com` would
     # otherwise clobber the `auth.${domain}` template and break the cascade
     # when the operator changes `domain` in `.stackwiz.env`.
     for key, val in state_config.items():

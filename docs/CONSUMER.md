@@ -332,13 +332,13 @@ Manifest `default:` strings can reference other field values using `${id}` synta
 
 ```yaml
 # components.yaml
-domain: "stackwiz.lab"              # top-level; also referenceable via ${domain}
+domain: "example.com"              # top-level; also referenceable via ${domain}
 
 config:
   - id: authentik_hostname
-    default: "auth.${domain}"        # resolves to auth.stackwiz.lab
+    default: "auth.${domain}"        # resolves to auth.example.com
   - id: authentik_admin_email
-    default: "admin@${domain}"       # resolves to admin@stackwiz.lab
+    default: "admin@${domain}"       # resolves to admin@example.com
   - id: ldap_base_dn
     default: "${domain_dn}"          # synthetic: dc=stackwiz,dc=lab
 ```
@@ -348,7 +348,7 @@ Synthetic variables injected by the framework:
 | Variable | Value |
 |---|---|
 | `${domain}` | the effective deployment domain (manifest default, overridable via `.stackwiz.env` or state) |
-| `${domain_dn}` | `domain` rendered as an LDAP base DN — `stackwiz.lab` → `dc=stackwiz,dc=lab` |
+| `${domain_dn}` | `domain` rendered as an LDAP base DN — `example.com` → `dc=stackwiz,dc=lab` |
 
 Plus `${<field_id>}` for any field in the `config:` section. Substitution is recursive (up to 4 hops) so chains like `a.${b}` where `b: "x.${domain}"` work. Unknown `${...}` placeholders stay literal.
 
@@ -380,7 +380,7 @@ Example output for 080:
 # Edit values below. Placeholders like ${domain} are resolved at load time,
 # so changing `domain:` cascades through any field that references it.
 
-domain: "stackwiz.lab"
+domain: "example.com"
 
 # Private network IP of this node: Used for Consul bind_addr and Vault api_addr
 #   required
@@ -388,13 +388,13 @@ node_ip: "192.168.56.20"
 
 # Authentik public hostname: Derives from the top-level domain unless overridden
 #   required
-authentik_hostname: "auth.stackwiz.lab"
+authentik_hostname: "auth.example.com"
 
 # Authentik admin email
 #   required
-authentik_admin_email: "admin@stackwiz.lab"
+authentik_admin_email: "admin@example.com"
 
-# LDAP base DN: Auto-derives from ${domain} (stackwiz.lab → dc=stackwiz,dc=lab)
+# LDAP base DN: Auto-derives from ${domain} (example.com → dc=stackwiz,dc=lab)
 #   required
 ldap_base_dn: "dc=stackwiz,dc=lab"
 
@@ -444,7 +444,7 @@ For the 080 consumer on a fixed-IP Vagrant VM, two options work well:
 cd 080.consul_vault_authentik
 cat > .stackwiz.env <<EOF
 node_ip: 192.168.56.20
-authentik_hostname: auth.stackwiz.lab
+authentik_hostname: auth.example.com
 ldap_base_dn: "dc=stackwiz,dc=lab"
 tls_mode: self-signed
 EOF
@@ -884,8 +884,8 @@ Sample from a real run:
 [20:14:20] INFO    engine:       staged manifest templates at /state/templates
 [20:14:20] INFO    engine:       nginx: install
 [20:14:20] INFO    script.nginx: → running install/nginx.sh (install)
-[20:14:20] INFO    script.nginx: stackwiz-tls: generated self-signed cert for auth.stackwiz.lab
-[20:14:20] INFO    script.nginx: nginx: cert=/etc/stackwiz/tls/auth.stackwiz.lab.crt key=...
+[20:14:20] INFO    script.nginx: stackwiz-tls: generated self-signed cert for auth.example.com
+[20:14:20] INFO    script.nginx: nginx: cert=/etc/stackwiz/tls/auth.example.com.crt key=...
 [20:14:20] WARNING script.nginx: nginx: configuration file /etc/nginx/nginx.conf test is successful
 [20:14:20] WARNING script.nginx: Created symlink /etc/systemd/system/multi-user.target.wants/nginx.service
 [20:14:21] INFO    script.nginx: nginx: authentik reachable via HTTPS
