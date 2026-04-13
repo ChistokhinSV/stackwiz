@@ -161,7 +161,9 @@ class Engine:
                             break
                         for svc in earlier.all_consul_services():
                             try:
-                                self.consul.register_service(earlier, svc, node_address=self._node_ip)
+                                self.consul.register_service(
+                                    earlier, svc, node_address=self._node_ip,
+                                )
                                 log.info("%s: retroactively registered in consul as %s",
                                          earlier.id, svc.name)
                             except Exception as exc:  # noqa: BLE001
