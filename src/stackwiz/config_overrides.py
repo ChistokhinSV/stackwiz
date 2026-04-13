@@ -81,6 +81,46 @@ def _domain_to_dn(domain: str) -> str:
     return ",".join(f"dc={p}" for p in parts)
 
 
+def _resolve_node_ip(domain: str) -> str:
+    """Resolve node IP from DNS (domain) → hostname -I → empty.
+
+    Used when `node_ip` (or any `*_ip` field) is set to ``"auto"``.
+    Tries DNS resolution of the deployment domain first, then falls
+    back to the first non-loopback IP from ``hostname -I``.
+    """
+    import logging
+    import subprocess
+
+    log = logging.getLogger("stackwiz.config")
+
+    # Try DNS resolution of the domain.
+    try:
+        import dns.resolver
+        answers = dns.resolver.resolve(domain, "A", lifetime=3.0)
+        for rdata in answers:
+            ip = str(rdata)
+            log.info("node_ip: resolved %s → %s (DNS)", domain, ip)
+            return ip
+    except Exception:
+        pass
+
+    # Fallback: first IP from hostname -I.
+    try:
+        result = subprocess.run(
+            ["hostname", "-I"], capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            ip = result.stdout.strip().split()[0]
+            if ip:
+                log.info("node_ip: resolved via hostname -I → %s", ip)
+                return ip
+    except Exception:
+        pass
+
+    log.warning("node_ip: auto-detection failed for domain %s", domain)
+    return ""
+
+
 def effective_config(
     manifest: Manifest,
     state_config: dict[str, Any],
@@ -138,4 +178,13 @@ def effective_config(
     config_values: dict[str, Any] = {
         f.id: resolved.get(f.id, f.default) for f in manifest.config
     }
+
+    # Auto-resolve any field with value "auto" that looks like an IP field.
+    # Convention: fields named *_ip or node_ip with value "auto" get resolved
+    # from DNS (domain) → hostname -I.
+    for field in manifest.config:
+        val = config_values.get(field.id)
+        if val == "auto" and (field.id.endswith("_ip") or field.id == "node_ip"):
+            config_values[field.id] = _resolve_node_ip(domain)
+
     return config_values, domain

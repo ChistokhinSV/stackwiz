@@ -352,6 +352,25 @@ Synthetic variables injected by the framework:
 
 Plus `${<field_id>}` for any field in the `config:` section. Substitution is recursive (up to 4 hops) so chains like `a.${b}` where `b: "x.${domain}"` work. Unknown `${...}` placeholders stay literal.
 
+### Auto-resolved `node_ip`
+
+Any config field whose id ends in `_ip` (or is exactly `node_ip`) and whose value is `"auto"` is automatically resolved by the framework:
+
+1. **DNS lookup** — resolve the deployment `domain` to an A record
+2. **Fallback** — first non-loopback IP from `hostname -I`
+3. **Error** — empty string if both fail (install script should check)
+
+This means all consumers can declare:
+
+```yaml
+config:
+  - id: node_ip
+    default: "auto"
+    help: "Auto-detected from DNS (domain) or hostname -I"
+```
+
+and the TUI config screen shows the resolved IP instead of "auto". Install scripts receive the actual IP in `WIZ_CFG_NODE_IP`. Operators can still override with a specific IP in `.stackwiz.env`.
+
 **Override-once, cascade-everywhere**: an operator only needs to set `domain: mycompany.internal` in `.stackwiz.env` and all derived fields automatically become `auth.mycompany.internal`, `admin@mycompany.internal`, `dc=mycompany,dc=internal`. Both the welcome screen (for service discovery) and the config screen (for the form pre-fill) see the same resolved values.
 
 ### Generating the `.stackwiz.env` scaffold
