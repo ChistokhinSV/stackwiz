@@ -412,13 +412,13 @@ def init_env(
         write_secrets_env_scaffold(secrets_target, manifest, existing_secrets, user_specs)
         click.echo(f"wrote {secrets_target}")
 
-    # Generate .env (shell-style KEY=VALUE) for TLS / DNS API credentials
-    # that bootstrap.sh passes through as docker -e flags.
-    tls_ids = {f.id for f in manifest.config}
-    if tls_ids & {"tls_mode", "certbot_email"}:
-        dot_env = manifest_dir / ".env"
+    # Generate .env (shell-style KEY=VALUE) for bootstrap credentials.
+    # Merges built-in TLS placeholders with project's .env.template (if any).
+    dot_env = manifest_dir / ".env"
+    env_template = manifest_dir / ".env.template"
+    if (env_template.exists() or {f.id for f in manifest.config} & {"tls_mode", "certbot_email"}):
         if not dot_env.exists() or force:
-            _write_dot_env(dot_env)
+            _write_dot_env(dot_env, env_template)
             click.echo(f"wrote {dot_env}")
 
     # Idempotently ensure all env files are gitignored.
@@ -473,28 +473,51 @@ def _try_read_existing(path: Path) -> dict[str, object]:
         return {}
 
 
-def _write_dot_env(path: Path) -> None:
-    """Write a .env scaffold with TLS / DNS API credential placeholders.
+def _write_dot_env(path: Path, template: Path | None = None) -> None:
+    """Write a .env scaffold for bootstrap.sh.
+
+    Starts with a built-in TLS/DNS placeholder block, then appends the
+    project's ``.env.template`` (if provided) with all ``KEY=VALUE`` lines
+    commented out so the user can selectively uncomment what they need.
 
     bootstrap.sh sources this file so the operator fills it once and the
     credentials persist across runs without exporting in their shell.
     """
-    content = """\
-# stackwiz bootstrap credentials
-# Fill the credentials you need; bootstrap.sh sources this file automatically.
-# This file is gitignored — it contains secrets.
+    lines = [
+        "# stackwiz bootstrap credentials",
+        "# Fill the credentials you need; bootstrap.sh sources this file automatically.",
+        "# This file is gitignored -- it contains secrets.",
+        "",
+        "# ---- TLS / Let's Encrypt DNS challenge credentials ----",
+        "# Uncomment ONE provider block. If none are set and tls_mode is \"auto\",",
+        "# the TLS helper falls back to self-signed certificates.",
+        "",
+        "# Cloudflare DNS-01 (fastest, recommended):",
+        "#CF_DNS_API_TOKEN=",
+        "",
+        "# AWS Route53 DNS-01:",
+        "#AWS_DNS_ACCESS_KEY_ID=",
+        "#AWS_DNS_SECRET_ACCESS_KEY=",
+    ]
 
-# ---- TLS / Let's Encrypt DNS challenge credentials ----
-# Uncomment ONE provider block. If none are set and tls_mode is "auto",
-# the TLS helper falls back to self-signed certificates.
+    if template is not None and template.exists():
+        lines.append("")
+        lines.append(f"# ---- From {template.name} ----")
+        for raw in template.read_text(encoding="utf-8").splitlines():
+            stripped = raw.strip()
+            # Preserve blank lines and existing comments as-is
+            if not stripped or stripped.startswith("#"):
+                lines.append(raw)
+            else:
+                # Comment out KEY=VALUE lines so user opts in explicitly
+                lines.append(f"#{raw}")
+        # Ensure trailing newline
+        if lines and lines[-1] != "":
+            lines.append("")
 
-# Cloudflare DNS-01 (fastest, recommended):
-#CF_DNS_API_TOKEN=
-
-# AWS Route53 DNS-01:
-#AWS_DNS_ACCESS_KEY_ID=
-#AWS_DNS_SECRET_ACCESS_KEY=
-"""
+    content = "\n".join(lines)
+    if not content.endswith("\n"):
+        content += "\n"
     path.write_text(content, encoding="utf-8")
     try:
         path.chmod(0o600)

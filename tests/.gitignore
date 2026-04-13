@@ -1,2 +1,4 @@
 .stackwiz.env
 .stackwiz.secrets.env
+
+.env
