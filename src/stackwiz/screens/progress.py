@@ -54,9 +54,11 @@ class ProgressScreen(Screen):
         table = self.query_one("#progress-table", DataTable)
         # Explicit key= so update_cell("status", ...) matches the column.
         # add_columns() auto-generates keys that DON'T match the label string.
-        table.add_column("status", key="status")
-        table.add_column("component", key="component")
-        table.add_column("action", key="action")
+        # Fixed widths: status(3) + component(16) + action(10) leave ~50 chars
+        # for message on an 80-column terminal.
+        table.add_column(" ", key="status", width=3)
+        table.add_column("component", key="component", width=16)
+        table.add_column("action", key="action", width=10)
         table.add_column("message", key="message")
         for component in self.installer.manifest.topo_order():
             table.add_row(
@@ -111,7 +113,7 @@ class ProgressScreen(Screen):
             # Mirror the latest output line into the DataTable message column
             # so the operator sees progress at a glance (e.g. "Downloading 80MB"
             # during a docker pull) without watching the log scroll.
-            snippet = event.line.strip()[:60]
+            snippet = event.line.strip()[:80]
             if snippet:
                 try:
                     table.update_cell(event.component_id, "message", snippet)
