@@ -101,6 +101,16 @@ class Engine:
         """
         self._stage_host_helpers()
         self.state.save_config(config_values)
+        # Resolve node IP for Consul service registration.
+        # Checks node_ip first, then any *_internal_ip field.
+        self._node_ip = str(
+            config_values.get("node_ip")
+            or next(
+                (v for k, v in config_values.items()
+                 if k.endswith("_internal_ip") and v),
+                "127.0.0.1",
+            )
+        )
         actions = self.state.plan_actions(
             self.manifest, selected_ids, config_values, forced_refresh
         )
@@ -151,7 +161,7 @@ class Engine:
                             break
                         for svc in earlier.all_consul_services():
                             try:
-                                self.consul.register_service(earlier, svc)
+                                self.consul.register_service(earlier, svc, node_address=self._node_ip)
                                 log.info("%s: retroactively registered in consul as %s",
                                          earlier.id, svc.name)
                             except Exception as exc:  # noqa: BLE001
@@ -181,7 +191,7 @@ class Engine:
             if self.consul is not None:
                 for svc in services:
                     try:
-                        self.consul.register_service(component, svc)
+                        self.consul.register_service(component, svc, node_address=self._node_ip)
                         log.info("%s: registered in consul as %s",
                                  component.id, svc.name)
                     except Exception as exc:  # noqa: BLE001

@@ -51,16 +51,24 @@ class ConsulClient:
             return
         check = None
         if svc.check is not None:
+            # Replace 127.0.0.1 in check URLs with the actual node address
+            # so Consul agent can reach the service on remote hosts.
+            def _rewrite(url: str) -> str:
+                if node_address != "127.0.0.1":
+                    return url.replace("127.0.0.1", node_address)
+                return url
+
             if svc.check.http:
                 check = consul.Check.http(
-                    svc.check.http,
+                    _rewrite(svc.check.http),
                     interval=svc.check.interval,
                     timeout=svc.check.timeout,
                 )
             elif svc.check.tcp:
+                tcp = _rewrite(svc.check.tcp)
                 check = consul.Check.tcp(
-                    svc.check.tcp.split(":")[0],
-                    int(svc.check.tcp.split(":")[1]),
+                    tcp.split(":")[0],
+                    int(tcp.split(":")[1]),
                     interval=svc.check.interval,
                     timeout=svc.check.timeout,
                 )
