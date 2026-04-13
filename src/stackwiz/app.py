@@ -1,6 +1,7 @@
 """Textual App shell and screen routing."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -116,13 +117,18 @@ class InstallerApp(App[int]):
         to the VAULT_TOKEN env var, which is typically empty on re-runs.
         """
         if self.consul_probe and self.consul_probe.reachable and self.consul_probe.address:
-            # ACL-enabled consul needs a management token to register services;
-            # consumer install scripts (e.g. 081) persist it to this file.
+            # ACL-enabled consul needs a token. Try local file first,
+            # then CONSUL_HTTP_TOKEN env (passed by bootstrap.sh).
             consul_token_file = self.state_dir / "consul-http-token"
             consul_token = (
                 consul_token_file.read_text().strip()
                 if consul_token_file.exists() else None
             )
+            if not consul_token:
+                consul_token = (
+                    os.environ.get("CONSUL_HTTP_TOKEN", "").strip()
+                    or None
+                )
             self.consul_client = ConsulClient(
                 self.consul_probe.address, token=consul_token
             )

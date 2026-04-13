@@ -315,6 +315,8 @@ def render_info(
     if consul_probe.reachable and consul_probe.address:
         token_file = state_dir / "consul-http-token"
         token = token_file.read_text().strip() if token_file.exists() else None
+        if not token:
+            token = os.environ.get("CONSUL_HTTP_TOKEN", "").strip() or None
         consul_client = ConsulClient(consul_probe.address, token=token)
 
     vault_probe = asyncio.run(probe_vault(effective_domain, manifest.vault_host))
