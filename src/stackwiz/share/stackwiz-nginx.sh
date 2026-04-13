@@ -64,12 +64,37 @@ _stackwiz_nginx_consumer_count() {
 
 # ---- Container lifecycle ----------------------------------------------------
 
+_stackwiz_nginx_discover_gelf() {
+    # Try to discover Graylog GELF endpoint from Consul for centralized logging.
+    # Falls back to 127.0.0.1 (works if Graylog is on the same host; silently
+    # drops UDP if nothing listens).
+    local consul_addr="${CONSUL_HTTP_ADDR:-http://127.0.0.1:8500}"
+    local consul_token=""
+    local state_dir="${STACKWIZ_STATE_DIR:-/var/lib/stackwiz}"
+    # Read consul token from any consumer's state dir.
+    for d in "${state_dir}"/*/consul-http-token "${state_dir}/consul-http-token"; do
+        if [ -f "$d" ]; then consul_token="$(cat "$d")"; break; fi
+    done
+    local addr=""
+    if [ -n "${consul_token}" ]; then
+        addr="$(curl -sf -H "X-Consul-Token: ${consul_token}" \
+            "${consul_addr}/v1/catalog/service/graylog" 2>/dev/null \
+            | python3 -c 'import sys,json
+d=json.load(sys.stdin)
+if d: print(d[0].get("ServiceAddress") or d[0].get("Address",""))' 2>/dev/null || true)"
+    fi
+    echo "${addr:-127.0.0.1}"
+}
+
 _stackwiz_nginx_write_compose() {
     # The compose file lives alongside the consumer dir at a well-known path.
     # It is framework-owned — consumers MUST NOT edit it.
     local bin_dir="${STACKWIZ_STATE_DIR:-/var/lib/stackwiz}/bin"
+    local gelf_host
+    gelf_host="$(_stackwiz_nginx_discover_gelf)"
     if [ -f "${bin_dir}/stackwiz-nginx-compose.yml" ]; then
-        cp "${bin_dir}/stackwiz-nginx-compose.yml" "${STACKWIZ_NGINX_COMPOSE}"
+        sed "s|udp://127.0.0.1:12201|udp://${gelf_host}:12201|g" \
+            "${bin_dir}/stackwiz-nginx-compose.yml" > "${STACKWIZ_NGINX_COMPOSE}"
     else
         # Inline fallback if the staged file is missing (shouldn't happen).
         cat > "${STACKWIZ_NGINX_COMPOSE}" <<'YAML'
