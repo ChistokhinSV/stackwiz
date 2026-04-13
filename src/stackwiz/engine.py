@@ -465,8 +465,11 @@ class Engine:
 
         def _copy_dir(src: Path, dst: Path, exec_mode: bool) -> None:
             dst.mkdir(parents=True, exist_ok=True)
+            # Copy source files to destination
+            src_files: set[str] = set()
             for item in src.rglob("*"):
                 rel = item.relative_to(src)
+                src_files.add(str(rel))
                 target = dst / rel
                 if item.is_dir():
                     target.mkdir(parents=True, exist_ok=True)
@@ -481,6 +484,14 @@ class Engine:
                             )
                         except OSError:
                             pass
+            # Remove files in dst that no longer exist in src
+            for item in sorted(dst.rglob("*"), reverse=True):
+                rel = str(item.relative_to(dst))
+                if rel not in src_files:
+                    if item.is_file():
+                        item.unlink()
+                    elif item.is_dir() and not any(item.iterdir()):
+                        item.rmdir()
 
         share_candidates = [
             Path("/usr/local/share/stackwiz"),                 # production
