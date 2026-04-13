@@ -28,7 +28,8 @@ stackwiz_tls_paths() {
 }
 
 stackwiz_tls_le_paths() {
-    local host="$1"
+    # Certbot stores wildcard certs under the base domain, not "*.domain".
+    local host="${1#\*.}"
     echo "/etc/letsencrypt/live/${host}/fullchain.pem" \
          "/etc/letsencrypt/live/${host}/privkey.pem"
 }
