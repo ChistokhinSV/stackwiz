@@ -57,9 +57,9 @@ class ProgressScreen(Screen):
         # Fixed widths: status(3) + component(16) + action(10) leave ~50 chars
         # for message on an 80-column terminal.
         table.add_column(" ", key="status", width=3)
-        table.add_column("component", key="component", width=16)
-        table.add_column("action", key="action", width=10)
-        table.add_column("message", key="message")
+        table.add_column("component", key="component", width=14)
+        table.add_column("action", key="action", width=9)
+        table.add_column("message", key="message", width=52)
         for component in self.installer.manifest.topo_order():
             table.add_row(
                 STATUS_ICON[Status.PENDING],
