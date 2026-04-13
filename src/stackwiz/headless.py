@@ -64,8 +64,16 @@ async def _run(
     consul_client: ConsulClient | None = None
     vault_client: VaultClient | None = None
     if consul_probe.reachable and consul_probe.address:
-        consul_client = ConsulClient(consul_probe.address)
-        print(f"[auto] consul: {consul_probe.address} ({consul_probe.source.value})")
+        consul_token_file = state_dir / "consul-http-token"
+        consul_token = (
+            consul_token_file.read_text().strip()
+            if consul_token_file.exists() else None
+        )
+        if not consul_token:
+            consul_token = os.environ.get("CONSUL_HTTP_TOKEN", "").strip() or None
+        consul_client = ConsulClient(consul_probe.address, token=consul_token)
+        print(f"[auto] consul: {consul_probe.address} ({consul_probe.source.value})"
+              f"{' (ACL token)' if consul_token else ' (no ACL token)'}")
     else:
         print(f"[auto] consul: not reachable ({consul_probe.detail})")
     if vault_probe.reachable and vault_probe.address:
