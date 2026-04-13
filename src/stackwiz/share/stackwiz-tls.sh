@@ -93,6 +93,7 @@ stackwiz_tls_try_cloudflare() {
     chmod 600 "$creds"
     echo "stackwiz-tls: requesting cert for ${host} via Cloudflare DNS-01..."
     if certbot certonly --dns-cloudflare --dns-cloudflare-credentials "$creds" \
+        --dns-cloudflare-propagation-seconds 30 \
         -d "$host" --non-interactive --agree-tos --email "$email" >/dev/null 2>&1 \
         && [ -f "$le_cert" ] && [ -f "$le_key" ]; then
         CERT_PATH="$le_cert"; KEY_PATH="$le_key"
