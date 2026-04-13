@@ -321,6 +321,8 @@ def render_info(
     if vault_probe.reachable and vault_probe.address:
         token_file = state_dir / "vault-token"
         token = token_file.read_text().strip() if token_file.exists() else None
+        if not token:
+            token = os.environ.get("VAULT_TOKEN", "").strip() or None
         vault_client = VaultClient(vault_probe.address, token=token)
 
     report = collect(manifest, state, consul_client, vault_client, show_secrets)

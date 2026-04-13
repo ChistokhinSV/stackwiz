@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,8 @@ async def _run(
     if vault_probe.reachable and vault_probe.address:
         token_file = state_dir / "vault-token"
         token = token_file.read_text().strip() if token_file.exists() else None
+        if not token:
+            token = os.environ.get("VAULT_TOKEN", "").strip() or None
         vault_client = VaultClient(vault_probe.address, token=token)
         print(f"[auto] vault: {vault_probe.address} ({vault_probe.source.value})")
     else:
