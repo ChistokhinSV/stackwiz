@@ -172,6 +172,7 @@ When the engine runs `install/<component>.sh`, it pipes the script content to `b
 | `CONSUL_HTTP_ADDR` | reachable Consul agent (if any) |
 | `VAULT_ADDR` | reachable Vault (if any) |
 | `STACKWIZ_STATE_DIR` | **host-side** state dir, e.g. `/var/lib/stackwiz` — scripts should use this for anything persistent |
+| `WIZ_MANIFEST_DIR` | **host-side** consumer repo path (where `components.yaml` lives). Use for files that aren't staged — e.g. `cd ${WIZ_MANIFEST_DIR}/deploy && docker compose build` |
 | env vars from `consul_discover:` mappings | looked up from Consul catalog before the script runs |
 
 Write your scripts **idempotently** — stackwiz re-runs them on every `run` (skipped via a config-hash diff, but still expect them to handle "already installed" cleanly). See [Idempotency guidelines](#idempotency-guidelines) below.

@@ -397,6 +397,11 @@ class Engine:
         if self.consul is not None:
             env["CONSUL_HTTP_ADDR"] = self.consul.address
         env["STACKWIZ_STATE_DIR"] = self.state.host_path()
+        # Host-side manifest dir — so nsenter scripts can find repo files
+        # (the container's /manifest mount isn't visible from host PID 1).
+        host_manifest = os.environ.get("STACKWIZ_HOST_MANIFEST_DIR", "")
+        if host_manifest:
+            env["WIZ_MANIFEST_DIR"] = host_manifest
         return env
 
     def _kv_payload(
