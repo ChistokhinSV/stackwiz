@@ -82,29 +82,18 @@ def _domain_to_dn(domain: str) -> str:
 
 
 def _resolve_node_ip(domain: str) -> str:
-    """Resolve node IP from DNS (domain) → hostname -I → empty.
+    """Resolve node IP from hostname -I → DNS (domain) → empty.
 
     Used when `node_ip` (or any `*_ip` field) is set to ``"auto"``.
-    Tries DNS resolution of the deployment domain first, then falls
-    back to the first non-loopback IP from ``hostname -I``.
+    Prefers ``hostname -I`` (always returns the real LAN IP) over DNS,
+    which may return a CDN/proxy address (e.g. Cloudflare).
     """
     import logging
     import subprocess
 
     log = logging.getLogger("stackwiz.config")
 
-    # Try DNS resolution of the domain.
-    try:
-        import dns.resolver
-        answers = dns.resolver.resolve(domain, "A", lifetime=3.0)
-        for rdata in answers:
-            ip = str(rdata)
-            log.info("node_ip: resolved %s → %s (DNS)", domain, ip)
-            return ip
-    except Exception:
-        pass
-
-    # Fallback: first IP from hostname -I.
+    # Prefer hostname -I — always gives the real local IP.
     try:
         result = subprocess.run(
             ["hostname", "-I"], capture_output=True, text=True, timeout=5,
@@ -114,6 +103,17 @@ def _resolve_node_ip(domain: str) -> str:
             if ip:
                 log.info("node_ip: resolved via hostname -I → %s", ip)
                 return ip
+    except Exception:
+        pass
+
+    # Fallback: DNS resolution of the domain.
+    try:
+        import dns.resolver
+        answers = dns.resolver.resolve(domain, "A", lifetime=3.0)
+        for rdata in answers:
+            ip = str(rdata)
+            log.info("node_ip: resolved %s → %s (DNS)", domain, ip)
+            return ip
     except Exception:
         pass
 
