@@ -510,7 +510,7 @@ class Engine:
 
         # Stage any top-level directories that install scripts need for docker
         # build contexts (e.g. mcp/ for MCP server containers).
-        for extra in ("mcp",):
+        for extra in ("mcp", "remote"):
             extra_dir = self.executor.manifest_dir / extra
             if extra_dir.is_dir():
                 _copy_dir(
@@ -519,3 +519,12 @@ class Engine:
                     exec_mode=False,
                 )
                 log.info("staged %s at %s", extra, self.state.host_path(extra))
+
+        # Stage individual top-level files that install scripts reference.
+        for fname in ("projects.conf",):
+            src = self.executor.manifest_dir / fname
+            if src.is_file():
+                import shutil
+                dst = self.state.state_dir / fname
+                shutil.copyfile(src, dst)
+                log.info("staged %s at %s", fname, self.state.host_path(fname))
