@@ -43,6 +43,32 @@ fi
 STACKWIZ_IMAGE="${STACKWIZ_IMAGE:-ghcr.io/chistokhinsv/stackwiz:latest}"
 STATE_DIR="${STACKWIZ_STATE_DIR:-/var/lib/stackwiz}"
 
+# --- Auto-discover Consul and Vault if not explicitly set ---
+if [ -z "${CONSUL_HTTP_ADDR:-}" ]; then
+  for addr in "http://127.0.0.1:8500" "http://consul.$(hostname -d 2>/dev/null || echo local):8500"; do
+    if curl -sf "${addr}/v1/status/leader" >/dev/null 2>&1; then
+      CONSUL_HTTP_ADDR="$addr"
+      echo "[bootstrap] discovered Consul at ${CONSUL_HTTP_ADDR}"
+      break
+    fi
+  done
+fi
+
+if [ -z "${VAULT_ADDR:-}" ] && [ -n "${CONSUL_HTTP_ADDR:-}" ]; then
+  VAULT_SVC=$(curl -sf "${CONSUL_HTTP_ADDR}/v1/catalog/service/vault" 2>/dev/null \
+    | python3 -c "
+import sys,json
+r=json.load(sys.stdin)
+if r:
+    s=r[0]; addr=s.get('ServiceAddress') or s['Address']; port=s['ServicePort']
+    print(f'https://{addr}:{port}')
+" 2>/dev/null || true)
+  if [ -n "$VAULT_SVC" ]; then
+    VAULT_ADDR="$VAULT_SVC"
+    echo "[bootstrap] discovered Vault at ${VAULT_ADDR}"
+  fi
+fi
+
 if ! command -v docker >/dev/null; then
   echo "[bootstrap] installing Docker..."
   curl -fsSL https://get.docker.com | sudo sh
