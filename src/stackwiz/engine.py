@@ -407,6 +407,8 @@ class Engine:
                     env[discover.env_var] = f"{entry.address}:{entry.port}"
 
         env["VAULT_ADDR"] = self.vault.address if self.vault else ""
+        if self.vault is not None and self.vault._token:
+            env["VAULT_TOKEN"] = self.vault._token
         if self.consul is not None:
             env["CONSUL_HTTP_ADDR"] = self.consul.address
         env["STACKWIZ_STATE_DIR"] = self.state.host_path()

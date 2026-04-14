@@ -28,8 +28,11 @@ _stackwiz_snmp_vault_addr() {
 }
 
 _stackwiz_snmp_vault_token() {
+    # Prefer VAULT_TOKEN env var (set by the engine for every install script).
+    if [ -n "${VAULT_TOKEN:-}" ]; then echo "$VAULT_TOKEN"; return 0; fi
+    # Fallback: read from state dir (for manual invocations).
     local state="${STACKWIZ_STATE_DIR:-/var/lib/stackwiz}"
-    for f in "${state}"/*/vault-token "${state}/vault-token"; do
+    for f in "${state}/vault-token" "${state}"/*/vault-token; do
         if [ -f "$f" ]; then cat "$f"; return 0; fi
     done
     echo ""
@@ -142,8 +145,8 @@ EOF
     systemctl enable snmpd >/dev/null 2>&1
     systemctl start snmpd
 
-    # 7. Verify
-    sleep 1
+    # 7. Verify (snmpd needs a moment to process createUser on first start)
+    sleep 3
     if snmpget -v3 -u "${snmp_user}" -l authPriv \
         -a "${auth_proto}" -A "${auth_key}" \
         -x "${priv_proto}" -X "${priv_key}" \
