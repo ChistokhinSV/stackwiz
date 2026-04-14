@@ -125,19 +125,14 @@ rouser ${snmp_user} priv
 view all included .1
 EOF
 
-    # 5. Create SNMPv3 user in the persistent user database.
-    # net-snmp stores users in /var/lib/snmp/snmpd.conf (not the main config).
-    # Remove old entry first (idempotent).
-    local snmp_db="/var/lib/snmp/snmpd.conf"
-    if [ -f "$snmp_db" ]; then
-        sed -i "/^usmUser.*${snmp_user}/d" "$snmp_db"
-        sed -i "/^createUser.*${snmp_user}/d" "$snmp_db"
-    fi
-    # Also remove from main config's createUser (some distros)
-    sed -i "/^createUser.*${snmp_user}/d" /etc/snmp/snmpd.conf
-
-    # Append createUser — snmpd converts it to a hashed usmUser on first start
-    # and removes the cleartext createUser line.
+    # 5. Create SNMPv3 user.
+    # net-snmp persists users in /var/lib/snmp/snmpd.conf as hashed usmUser
+    # entries. On first start, it converts cleartext `createUser` lines from
+    # /etc/snmp/snmpd.conf into these hashed entries and removes the cleartext.
+    # On re-runs, the hashed entry already exists and createUser is silently
+    # ignored OR conflicts. Wipe the persistent DB entirely so createUser
+    # always takes effect cleanly.
+    rm -f /var/lib/snmp/snmpd.conf
     echo "createUser ${snmp_user} ${auth_proto} \"${auth_key}\" ${priv_proto} \"${priv_key}\"" \
         >> /etc/snmp/snmpd.conf
 
