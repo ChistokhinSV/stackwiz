@@ -59,11 +59,50 @@ _stackwiz_snmp_vault_put() {
     addr="$(_stackwiz_snmp_vault_addr)"
     token="$(_stackwiz_snmp_vault_token)"
     [ -z "$token" ] && { echo "stackwiz-snmp: no vault token — cannot store keys" >&2; return 1; }
+
+    local snmp_data="{\"snmp_user\":\"${user}\",\"auth_protocol\":\"SHA\",\"auth_key\":\"${auth_key}\",\"priv_protocol\":\"AES\",\"priv_key\":\"${priv_key}\"}"
+
+    # Fleet-wide template (backward compat + source for new VMs).
     curl -sfk -X PUT -H "X-Vault-Token: ${token}" \
         -H "Content-Type: application/json" \
         "${addr}/v1/stackwiz/data/${STACKWIZ_SNMP_VAULT_PATH}" \
-        -d "{\"data\":{\"snmp_user\":\"${user}\",\"auth_protocol\":\"SHA\",\"auth_key\":\"${auth_key}\",\"priv_protocol\":\"AES\",\"priv_key\":\"${priv_key}\"}}" \
+        -d "{\"data\":${snmp_data}}" \
         >/dev/null 2>&1
+
+    # Per-host entry: merge SNMP keys into the host's existing secret
+    # (preserves SSH keys etc. if already stored there).
+    _stackwiz_snmp_vault_put_host "$addr" "$token" "$snmp_data"
+}
+
+_stackwiz_snmp_vault_put_host() {
+    local addr="$1" token="$2" snmp_data="$3"
+    local hostname
+    hostname="$(hostname -s 2>/dev/null || hostname)"
+    local host_path="shared/hosts/${hostname}"
+
+    # Read existing host secret (may have ssh_* keys etc.)
+    local existing
+    existing="$(curl -sfk -H "X-Vault-Token: ${token}" \
+        "${addr}/v1/stackwiz/data/${host_path}" 2>/dev/null \
+        | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin).get("data",{}).get("data",{})))' 2>/dev/null || echo '{}')"
+
+    # Merge: existing keys + new SNMP keys (SNMP wins on conflict).
+    local merged
+    merged="$(python3 -c "
+import json,sys
+existing = json.loads('''${existing}''')
+snmp = json.loads('''${snmp_data}''')
+existing.update(snmp)
+print(json.dumps(existing))
+" 2>/dev/null || echo "$snmp_data")"
+
+    curl -sfk -X PUT -H "X-Vault-Token: ${token}" \
+        -H "Content-Type: application/json" \
+        "${addr}/v1/stackwiz/data/${host_path}" \
+        -d "{\"data\":${merged}}" \
+        >/dev/null 2>&1 && \
+        echo "stackwiz-snmp: stored credentials at ${host_path}" || \
+        echo "stackwiz-snmp: WARNING: failed to store per-host credentials" >&2
 }
 
 _stackwiz_snmp_generate_key() {
