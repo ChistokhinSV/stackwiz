@@ -129,6 +129,14 @@ stackwiz_snmp_install() {
         priv_proto="$(echo "$vault_data" | sed -n '4p')"
         priv_key="$(echo "$vault_data" | sed -n '5p')"
         echo "stackwiz-snmp: using existing credentials from Vault"
+        # Always ensure per-host entry exists (may be a new VM reusing fleet creds).
+        local _addr _token
+        _addr="$(_stackwiz_snmp_vault_addr)"
+        _token="$(_stackwiz_snmp_vault_token)"
+        if [ -n "$_token" ]; then
+            local _snmp_data="{\"snmp_user\":\"${snmp_user}\",\"auth_protocol\":\"${auth_proto}\",\"auth_key\":\"${auth_key}\",\"priv_protocol\":\"${priv_proto}\",\"priv_key\":\"${priv_key}\"}"
+            _stackwiz_snmp_vault_put_host "$_addr" "$_token" "$_snmp_data"
+        fi
     else
         snmp_user="${STACKWIZ_SNMP_USER}"
         auth_proto="SHA"
