@@ -145,7 +145,7 @@ EOF
     if snmpget -v3 -u "${snmp_user}" -l authPriv \
         -a "${auth_proto}" -A "${auth_key}" \
         -x "${priv_proto}" -X "${priv_key}" \
-        127.0.0.1 sysDescr.0 >/dev/null 2>&1; then
+        127.0.0.1 .1.3.6.1.2.1.1.1.0 >/dev/null 2>&1; then
         echo "stackwiz-snmp: verified OK (user=${snmp_user}, authPriv ${auth_proto}+${priv_proto})"
     else
         echo "stackwiz-snmp: snmpd running but verify failed (may need a moment to settle)" >&2
