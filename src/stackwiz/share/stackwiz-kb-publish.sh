@@ -33,6 +33,11 @@ stackwiz_kb_publish() {
         return 1
     fi
 
+    # Mark dirs safe BEFORE any git operation (ownership may differ
+    # between the stackwiz container uid and the host file owner).
+    git config --global --add safe.directory "$kb_dir" 2>/dev/null || true
+    git config --global --add safe.directory "$bare" 2>/dev/null || true
+
     # --- Init bare repo ---
     if [ ! -d "$bare/objects" ]; then
         echo "stackwiz-kb-publish: initializing bare repo at $bare"
@@ -46,10 +51,9 @@ stackwiz_kb_publish() {
     cd "$kb_dir"
     if [ ! -d .git ]; then
         git init -q -b main .
-        git config user.name "kb-bot"
-        git config user.email "kb-bot@local"
     fi
-    git config --add safe.directory "$kb_dir" 2>/dev/null || true
+    git config user.name "kb-bot"
+    git config user.email "kb-bot@local"
 
     # Set or update the publish remote.
     if git remote | grep -qx publish; then
