@@ -76,7 +76,7 @@ stackwiz_snmp_install() {
         echo "stackwiz-snmp: installing snmpd..."
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq >/dev/null
-        apt-get install -y -qq snmpd libsnmp-dev >/dev/null
+        apt-get install -y -qq snmpd snmp libsnmp-dev >/dev/null
     fi
 
     # 2. Read or generate credentials
