@@ -45,7 +45,7 @@ def test_both_singular_and_plural_rejected(tmp_path: Path) -> None:
     )
     p = tmp_path / "both.yaml"
     p.write_text(yaml.safe_dump(data))
-    with pytest.raises(Exception, match="consul_service or consul_services"):
+    with pytest.raises(Exception, match="mutually exclusive"):
         load_manifest(p)
 
 
