@@ -1,22 +1,32 @@
-"""Run bash install scripts on the host via nsenter.
+"""Run bash install scripts on the host, streaming stdout/stderr line-by-line.
 
-The installer container runs with `--privileged --pid=host --network=host`. Every
-install step is wrapped in `nsenter --target 1 --all -- bash -c '...'` so the
-script sees the host's systemd, apt, docker, k3s, etc. The Python process stays
-isolated in the container.
+Two execution strategies share one env-prep + log-pump path:
 
-When running outside a container (dev mode on Linux where you are already
-PID 1's namespace, or during unit tests) set `STACKWIZ_EXECUTOR_MODE=direct` to
-skip nsenter and exec the script in the current namespace.
+- ``nsenter``: used when stackwiz runs inside its container (the common case).
+  Every install step is piped to ``bash -s`` inside host PID 1's namespaces,
+  so the script sees the host's systemd, apt, docker, k3s, etc.
+- ``direct``: exec the script in the current namespace. Used when stackwiz
+  itself runs on the host (dev workflow, CI without containers, unit tests).
+
+Both modes are first-class. Strategy selection order:
+
+1. explicit ``mode=`` kwarg to ``Executor(...)``
+2. ``STACKWIZ_EXECUTOR_MODE`` env var
+3. auto-detect: ``nsenter`` if the binary is on PATH, else ``direct``
 """
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shlex
+import shutil
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+_VALID_MODES = ("nsenter", "direct")
+_log = logging.getLogger("stackwiz.executor")
 
 
 @dataclass
@@ -27,6 +37,17 @@ class StepResult:
     @property
     def ok(self) -> bool:
         return self.exit_code == 0
+
+
+def _resolve_mode(requested: str | None) -> str:
+    mode = requested or os.environ.get("STACKWIZ_EXECUTOR_MODE")
+    if mode is None:
+        mode = "nsenter" if shutil.which("nsenter") else "direct"
+    if mode not in _VALID_MODES:
+        raise ValueError(
+            f"invalid executor mode {mode!r}; expected one of {_VALID_MODES}"
+        )
+    return mode
 
 
 class Executor:
@@ -40,15 +61,17 @@ class Executor:
     ) -> None:
         self.manifest_dir = Path(manifest_dir)
         self.env_defaults = dict(env_defaults or {})
-        self.mode = mode or os.environ.get("STACKWIZ_EXECUTOR_MODE", "nsenter")
+        self.mode = _resolve_mode(mode)
+        _log.info("executor mode=%s manifest_dir=%s", self.mode, self.manifest_dir)
 
     def _build_command(self) -> list[str]:
         """Command that reads a bash script from stdin.
 
-        In nsenter mode the script is piped to `bash -s` running inside host
-        PID 1's namespaces — this sidesteps the fact that the container's
-        mounted /manifest directory isn't visible from the host's mount
-        namespace.
+        nsenter: script piped to ``bash -s`` inside host PID 1's namespaces
+        (the container's ``/manifest`` mount isn't visible to the host mount
+        namespace, so we always pipe rather than exec a path).
+
+        direct: ``bash -s`` in the current namespace.
         """
         if self.mode == "direct":
             return ["bash", "-s"]

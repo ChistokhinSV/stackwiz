@@ -35,10 +35,14 @@ stackwiz_tls_le_paths() {
 }
 
 stackwiz_tls_cert_fresh() {
-    # returns 0 if cert file exists and valid for >30 days
+    # returns 0 if cert file exists and valid for at least $2 seconds
+    # (default 30 days). Single source of truth for cert-validity checks —
+    # the engine + other helpers shell out to this rather than reimplementing
+    # `openssl x509 -checkend`.
     local cert="$1"
+    local window="${2:-2592000}"
     [ -f "$cert" ] || return 1
-    openssl x509 -checkend 2592000 -noout -in "$cert" >/dev/null 2>&1
+    openssl x509 -checkend "$window" -noout -in "$cert" >/dev/null 2>&1
 }
 
 # Idempotency check — emits CERT_PATH/KEY_PATH in caller's env and returns 0
@@ -246,3 +250,24 @@ stackwiz_nginx_render() {
         -e "s|__UPSTREAM__|${upstream}|g" \
         "$template"
 }
+
+# Subcommand dispatcher: `stackwiz-tls.sh check <cert-path> [window-seconds]`
+# exits 0 if the cert is fresh (default: 30 days). Intended for the engine
+# to shell out to instead of reimplementing the same openssl invocation in
+# Python — keeps the validity-window policy in exactly one place.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    case "${1:-}" in
+        check)
+            stackwiz_tls_cert_fresh "${2:-}" "${3:-2592000}"
+            exit $?
+            ;;
+        "")
+            echo "usage: stackwiz-tls.sh check <cert> [window-seconds]" >&2
+            exit 2
+            ;;
+        *)
+            echo "stackwiz-tls.sh: unknown subcommand '$1'" >&2
+            exit 2
+            ;;
+    esac
+fi

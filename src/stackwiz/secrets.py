@@ -121,6 +121,7 @@ def materialize_secrets(
     results: dict[str, MaterializedSecret] = {}
     for spec in manifest.secrets:
         vault_path = _secret_path(manifest, spec)
+        _migrate_previous_ids(manifest, spec, vault_path, vault)
         existing = vault.kv_get(vault_path)
         if existing and existing.get("value"):
             results[spec.id] = MaterializedSecret(
@@ -176,3 +177,32 @@ def delete_secrets(manifest: Manifest, vault: VaultClient) -> list[str]:
 
 def _secret_path(manifest: Manifest, spec: Secret) -> str:
     return spec.vault_path or f"{manifest.consul.service_prefix}/{spec.id}"
+
+
+def _migrate_previous_ids(
+    manifest: Manifest, spec: Secret, current_path: str, vault: VaultClient,
+) -> None:
+    """Move any value found at `<prefix>/<previous_id>` to the current path.
+
+    Runs before the normal materialize path, so a rename picks up the
+    existing value on the next install instead of orphaning it. No-op if
+    the current path already has a value — explicit operator overrides win.
+    """
+    if not spec.previous_ids:
+        return
+    if vault.kv_get(current_path):
+        return
+    prefix = manifest.consul.service_prefix
+    for old_id in spec.previous_ids:
+        old_path = f"{prefix}/{old_id}"
+        if old_path == current_path:
+            continue
+        old = vault.kv_get(old_path)
+        if old and old.get("value"):
+            vault.kv_put(current_path, old)
+            vault.kv_delete_metadata(old_path)
+            log.info(
+                "migrated secret %r from %s to %s",
+                spec.id, old_path, current_path,
+            )
+            return

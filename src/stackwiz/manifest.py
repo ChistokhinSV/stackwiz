@@ -38,6 +38,10 @@ class ConsulDiscover(BaseModel):
 
     service: str
     env_var: str
+    # When true (default), missing the service at install time aborts the step
+    # with a clear message. Set to false for soft dependencies whose absence
+    # should leave `env_var` unset rather than fail the install.
+    required: bool = True
 
 
 class ConsulConfig(BaseModel):
@@ -80,9 +84,13 @@ class Component(BaseModel):
     @model_validator(mode="after")
     def _service_exclusivity(self) -> Component:
         if self.consul_service is not None and self.consul_services:
+            svc_names = ", ".join(s.name for s in self.consul_services) or "<unnamed>"
             raise ValueError(
-                f"component {self.id!r}: use either consul_service or "
-                f"consul_services, not both"
+                f"component {self.id!r}: `consul_service` and `consul_services` "
+                f"are mutually exclusive. Use `consul_service:` for a single "
+                f"service (got {self.consul_service.name!r}) OR "
+                f"`consul_services:` for a list (got [{svc_names}]) — "
+                f"not both."
             )
         return self
 
@@ -105,12 +113,26 @@ class ConfigField(BaseModel):
     choices: list[str] | None = None
     required: bool = False
     help: str | None = None
+    # Derived fields are always re-rendered from their manifest default at run
+    # time; any value cached in state or typed into the TUI is ignored. Use
+    # for defaults that reference other config via ``${...}`` so one knob
+    # (e.g. domain) propagates through every derived hostname on every run.
+    # If omitted, fields whose default contains ``${...}`` are treated as
+    # derived (backward-compat heuristic). Set to ``false`` to freeze a
+    # resolved value into state.
+    derived: bool | None = None
 
     @model_validator(mode="after")
     def _select_has_choices(self) -> ConfigField:
         if self.type == "select" and not self.choices:
             raise ValueError(f"config field {self.id!r} is type=select but has no choices")
         return self
+
+    @property
+    def is_derived(self) -> bool:
+        if self.derived is not None:
+            return self.derived
+        return isinstance(self.default, str) and "${" in self.default
 
 
 class Secret(BaseModel):
@@ -129,6 +151,11 @@ class Secret(BaseModel):
     immutable: bool = False
     optional: bool = False  # if True and generate=False, missing value is OK (empty string)
     vault_path: str | None = None  # defaults to <service_prefix>/<id> if unset
+    # Earlier ids used for this secret. On first run, the engine migrates any
+    # value found at an old `<prefix>/<previous_id>` path to the new path,
+    # preserving immutable values across renames. The old path is deleted
+    # after the migration succeeds.
+    previous_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _type_contract(self) -> Secret:

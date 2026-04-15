@@ -140,8 +140,8 @@ def effective_config(
     for field in manifest.config:
         if field.default is not None:
             merged[field.id] = field.default
-            if isinstance(field.default, str) and "${" in field.default:
-                template_fields.add(field.id)
+        if field.is_derived:
+            template_fields.add(field.id)
 
     # Apply state cache, but SKIP any field whose manifest default is a
     # template (contains `${...}`). State stores fully-resolved values from

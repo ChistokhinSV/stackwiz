@@ -401,10 +401,21 @@ class Engine:
             env["WIZ_REFRESH"] = "1"
 
         if self.consul is not None:
+            # Re-probe on demand: a component earlier in this run may have
+            # registered the service, so querying the catalog NOW (not at
+            # engine startup) is what makes same-run discovery work.
             for discover in component.consul_discover:
                 entry = self.consul.discover(discover.service)
                 if entry is not None:
                     env[discover.env_var] = f"{entry.address}:{entry.port}"
+                elif discover.required:
+                    raise RuntimeError(
+                        f"component {component.id!r}: consul_discover target "
+                        f"{discover.service!r} is not registered in the catalog "
+                        f"(needed for env var {discover.env_var}). Register it "
+                        f"before this component runs, or mark the dependency "
+                        f"with `required: false`."
+                    )
 
         env["VAULT_ADDR"] = self.vault.address if self.vault else ""
         if self.vault is not None and self.vault._token:

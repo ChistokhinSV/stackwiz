@@ -540,6 +540,83 @@ def _yaml_line(key: str, value: object) -> str:
     return f'{key}: "{escaped}"'
 
 
+@main.command("extract-bootstrap")
+@click.option("--output", "output_dir", type=click.Path(file_okay=False, path_type=Path),
+              default=None,
+              help="Destination directory (default: stdout for lib, stub printed after).")
+@click.option("--stub-name", "stub_name", default="bootstrap.sh", show_default=True,
+              help="Filename for the consumer stub when --output is set.")
+@click.option("--force", is_flag=True, default=False,
+              help="Overwrite existing files under --output.")
+def extract_bootstrap(output_dir: Path | None, stub_name: str, force: bool) -> None:
+    """Emit the shared bootstrap library and a consumer stub.
+
+    With no --output: writes the library to stdout. Pipe to a file and add a
+    minimal stub that sources it.
+
+    With --output DIR: writes `stackwiz-bootstrap.sh` and a starter stub
+    (named `bootstrap.sh` by default) into DIR. The stub is a working
+    consumer template — edit its SW_* arrays to match your project.
+    """
+    from importlib.resources import files
+    lib_src = files("stackwiz").joinpath("share/bootstrap/stackwiz-bootstrap.sh")
+    lib_text = lib_src.read_text(encoding="utf-8")
+
+    stub_text = """#!/usr/bin/env bash
+# stackwiz consumer bootstrap stub. Edit SW_* arrays to match your project.
+set -euo pipefail
+
+# Host packages to ensure before running. Drop jq/openssl/envsubst if unused.
+SW_REQUIRED_PKGS=(curl ca-certificates jq openssl gettext-base python3)
+
+# Extra env vars to pass through to the installer container (beyond the
+# canonical set: CONSUL_HTTP_ADDR, VAULT_ADDR/TOKEN, CF/AWS DNS, CERTBOT_EMAIL,
+# STACKWIZ_TLS_FORCE, STACKWIZ_HOST_STATE_DIR, STACKWIZ_HOST_MANIFEST_DIR).
+SW_EXTRA_ENV=(CONSUL_HTTP_TOKEN)
+
+# Files the installer may write as root; reclaimed after each writable run.
+SW_CHOWN_FILES=(.stackwiz.env .stackwiz.secrets.env .env)
+
+# Default manifest mount mode (0 = ro, 1 = rw). Write-commands below flip it
+# regardless. Set to 1 only if install-time secret redaction rewrites files.
+SW_WRITABLE_DEFAULT=0
+
+# Args that force manifest RW / RO mount respectively.
+SW_WRITE_CMDS=(init-env)
+SW_READONLY_CMDS=(validate list info)
+
+# Args that imply headless run (no -it).
+SW_HEADLESS_ARGS=(--auto --validate validate list info init-env)
+
+. "$(dirname "$0")/stackwiz-bootstrap.sh"
+sw_bootstrap_main "$@"
+"""
+
+    if output_dir is None:
+        click.echo(lib_text, nl=False)
+        click.echo("\n# ---- sample stub ----", err=True)
+        click.echo(stub_text, err=True, nl=False)
+        return
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lib_path = output_dir / "stackwiz-bootstrap.sh"
+    stub_path = output_dir / stub_name
+    for p in (lib_path, stub_path):
+        if p.exists() and not force:
+            click.echo(f"error: {p} exists (pass --force to overwrite)", err=True)
+            sys.exit(2)
+    lib_path.write_text(lib_text, encoding="utf-8")
+    stub_path.write_text(stub_text, encoding="utf-8")
+    try:
+        lib_path.chmod(0o755)
+        stub_path.chmod(0o755)
+    except OSError:
+        pass
+    click.echo(f"wrote {lib_path}")
+    click.echo(f"wrote {stub_path}")
+    click.echo("Edit the SW_* arrays in the stub, then: ./bootstrap.sh validate")
+
+
 @main.command()
 @_shared_opts
 @click.option("--show-secrets", is_flag=True, default=False,

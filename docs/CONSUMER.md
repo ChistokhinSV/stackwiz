@@ -29,7 +29,8 @@ Ubuntu 22.04+, Debian 12+, or RHEL-family systemd. Required:
 
 ```
 <your-project-repo>/
-├── bootstrap.sh            # ~40 lines; docker pull + docker run stackwiz
+├── bootstrap.sh            # ~10 lines; thin stub that sources stackwiz-bootstrap.sh
+├── stackwiz-bootstrap.sh   # vendored shared library (refreshed via `wizinstall extract-bootstrap`)
 ├── components.yaml         # manifest
 ├── install/                # per-component bash scripts
 │   ├── consul.sh
@@ -263,49 +264,58 @@ envsubst '${AUTHENTIK_HOSTNAME} ${LDAP_BASE_DN}' \
 
 Always whitelist your envsubst variables — bare `envsubst` mangles YAML tags like `!Find` and `!KeyOf`.
 
-## Bootstrap.sh template
+## Bootstrap.sh — stub + shared library
+
+Consumers ship a ~10-line stub that declares only their project-specific knobs. The heavy lifting — `.env` sourcing, prereq install, Consul/Vault auto-discovery, Docker install, image pull with cache fallback, TTY/headless detection, `docker run` with correct mounts and env passthrough, post-run `chown` — lives in the framework-supplied `stackwiz-bootstrap.sh` library.
+
+### 1. Extract the library into your repo
+
+```bash
+# Run once when creating a new consumer; re-run to refresh to a newer version.
+docker run --rm -v "$PWD:/out" ghcr.io/chistokhinsv/stackwiz:latest \
+    extract-bootstrap --output /out --force
+```
+
+This writes `stackwiz-bootstrap.sh` (the library, commit this to the repo alongside your manifest) and a starter `bootstrap.sh` stub. Vendoring the library makes bootstrap work on air-gapped hosts — no network round-trip to GitHub at run time.
+
+### 2. Minimal stub
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-STACKWIZ_IMAGE="${STACKWIZ_IMAGE:-ghcr.io/chistokhinsv/stackwiz:latest}"
-STATE_DIR="${STACKWIZ_STATE_DIR:-/var/lib/stackwiz}"
+SW_REQUIRED_PKGS=(curl ca-certificates jq openssl gettext-base python3)
+SW_EXTRA_ENV=(CONSUL_HTTP_TOKEN)
+SW_CHOWN_FILES=(.stackwiz.env .stackwiz.secrets.env .env)
 
-if ! command -v docker >/dev/null; then
-  curl -fsSL https://get.docker.com | sudo sh
-fi
-sudo mkdir -p "${STATE_DIR}"
-
-if ! sudo docker image inspect "${STACKWIZ_IMAGE}" >/dev/null 2>&1; then
-  sudo docker pull "${STACKWIZ_IMAGE}"
-fi
-
-# Interactive TUI needs a pty; --auto / --validate run headless.
-headless=0
-for arg in "$@"; do
-  case "$arg" in --auto|--validate) headless=1 ;; esac
-done
-if [ "${headless}" -eq 1 ]; then
-  docker_flags=(--rm)
-else
-  docker_flags=(--rm -it)
-fi
-
-exec sudo docker run "${docker_flags[@]}" \
-  --privileged --pid=host --network=host \
-  -v "$PWD:/manifest:ro" \
-  -v "${STATE_DIR}:/state" \
-  -e STACKWIZ_HOST_STATE_DIR="${STATE_DIR}" \
-  -e CONSUL_HTTP_ADDR="${CONSUL_HTTP_ADDR:-}" \
-  -e VAULT_ADDR="${VAULT_ADDR:-}" \
-  -e VAULT_TOKEN="${VAULT_TOKEN:-}" \
-  -e CF_DNS_API_TOKEN="${CF_DNS_API_TOKEN:-}" \
-  -e AWS_DNS_ACCESS_KEY_ID="${AWS_DNS_ACCESS_KEY_ID:-}" \
-  -e AWS_DNS_SECRET_ACCESS_KEY="${AWS_DNS_SECRET_ACCESS_KEY:-}" \
-  -e CERTBOT_EMAIL="${CERTBOT_EMAIL:-}" \
-  "${STACKWIZ_IMAGE}" "$@"
+. "$(dirname "$0")/stackwiz-bootstrap.sh"
+sw_bootstrap_main "$@"
 ```
+
+### 3. Tuning knobs (all `SW_*` vars are optional — defaults shown)
+
+| Var | Default | Purpose |
+|---|---|---|
+| `SW_REQUIRED_PKGS` | `(curl ca-certificates jq openssl gettext-base python3)` | apt packages ensured before run |
+| `SW_EXTRA_ENV` | `()` | extra env vars passed to the installer container (beyond the canonical set below) |
+| `SW_CHOWN_FILES` | `(.stackwiz.env .stackwiz.secrets.env .env)` | files reclaimed via `chown` after any writable-manifest run |
+| `SW_WRITABLE_DEFAULT` | `0` | `1` = default manifest mount RW (use when install writes back to the manifest dir, e.g. post-Vault redaction) |
+| `SW_WRITE_CMDS` | `(init-env)` | CLI args that force manifest RW regardless of default |
+| `SW_READONLY_CMDS` | `(validate list info)` | CLI args that force manifest RO (overrides write-match) |
+| `SW_HEADLESS_ARGS` | `(--auto --validate validate list info init-env)` | CLI args that skip `-it` (no pty) |
+
+Canonical env vars always propagated: `CONSUL_HTTP_ADDR`, `VAULT_ADDR`, `VAULT_TOKEN`, `CF_DNS_API_TOKEN`, `AWS_DNS_ACCESS_KEY_ID`, `AWS_DNS_SECRET_ACCESS_KEY`, `CERTBOT_EMAIL`, `STACKWIZ_TLS_FORCE`, plus host path hints `STACKWIZ_HOST_STATE_DIR`, `STACKWIZ_HOST_MANIFEST_DIR`.
+
+### Refreshing the library
+
+```bash
+docker run --rm -v "$PWD:/out" ghcr.io/chistokhinsv/stackwiz:latest \
+    extract-bootstrap --output /out --force
+git diff stackwiz-bootstrap.sh    # review changes
+git add stackwiz-bootstrap.sh
+```
+
+The pinned copy is intentional: consumers decide when to adopt library changes; the framework doesn't silently mutate bootstrap behaviour under them.
 
 Usage:
 

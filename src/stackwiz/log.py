@@ -2,12 +2,19 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from datetime import UTC, datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 LOG_FORMAT = "[%(asctime)s] %(levelname)-5s %(short_name)s: %(message)s"
 LOG_DATEFMT = "%H:%M:%S %d.%m.%Y"
+
+# Rotation: 25 MB per file × 10 files = up to ~250 MB of history retained.
+# Override via STACKWIZ_LOG_MAX_BYTES / STACKWIZ_LOG_BACKUPS for ops tuning.
+_DEFAULT_LOG_MAX_BYTES = 25 * 1024 * 1024
+_DEFAULT_LOG_BACKUPS = 10
 
 
 class _ShortNameFilter(logging.Filter):
@@ -48,7 +55,11 @@ def configure(state_dir: Path, mode: str | None = None, verbose: bool = False) -
     # filters are not re-applied to records propagating up from child loggers
     # (like stackwiz.engine or stackwiz.script.consul), but handler filters
     # run for every record the handler processes.
-    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    max_bytes = int(os.environ.get("STACKWIZ_LOG_MAX_BYTES") or _DEFAULT_LOG_MAX_BYTES)
+    backups = int(os.environ.get("STACKWIZ_LOG_BACKUPS") or _DEFAULT_LOG_BACKUPS)
+    file_handler = RotatingFileHandler(
+        log_path, maxBytes=max_bytes, backupCount=backups, encoding="utf-8",
+    )
     file_handler.addFilter(_ShortNameFilter())
     file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATEFMT))
     file_handler._stackwiz = True  # type: ignore[attr-defined]
