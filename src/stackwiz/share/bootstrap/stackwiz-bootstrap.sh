@@ -156,28 +156,38 @@ sw_bootstrap_ensure_docker() {
 }
 
 # Pull image; fall back to cached copy if the registry is unreachable.
-# On pull failure, surface the underlying docker error so the operator can
-# distinguish auth / DNS / rate-limit / not-found issues instead of just
-# seeing "registry unreachable".
+# Surfaces whether the pull actually downloaded a newer image or the local
+# copy was already current, using docker's own Status: line. On failure,
+# surface the underlying docker error (auth / DNS / rate-limit / not-found)
+# instead of a generic "registry unreachable".
 sw_bootstrap_pull_image() {
   local image="${1:-$STACKWIZ_IMAGE}"
-  local pull_err
-  pull_err=$(sudo docker pull "$image" 2>&1 >/dev/null) && {
-    sw_log "image up to date"
+  local pull_out
+  if pull_out=$(sudo docker pull "$image" 2>&1); then
+    local status
+    status=$(echo "$pull_out" | grep -E '^Status:' | tail -n1)
+    local digest created
+    digest=$(sudo docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$image" 2>/dev/null || true)
+    created=$(sudo docker image inspect --format '{{.Created}}' "$image" 2>/dev/null || true)
+    if echo "$status" | grep -q 'Downloaded newer image'; then
+      sw_log "image refreshed (${digest:-$image}, built ${created})"
+    else
+      sw_log "image up to date (${digest:-$image}, built ${created})"
+    fi
     return 0
-  }
+  fi
   if sudo docker image inspect "$image" >/dev/null 2>&1; then
     local digest created
     digest=$(sudo docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$image" 2>/dev/null || true)
     created=$(sudo docker image inspect --format '{{.Created}}' "$image" 2>/dev/null || true)
-    sw_warn "docker pull failed: ${pull_err}"
+    sw_warn "docker pull failed: ${pull_out}"
     if [ -n "$digest" ]; then
       sw_warn "using cached image: ${digest} (built ${created})"
     else
       sw_warn "using cached image: ${image} (built ${created}; no RepoDigests — likely a local build)"
     fi
   else
-    sw_err "docker pull failed: ${pull_err}"
+    sw_err "docker pull failed: ${pull_out}"
     sw_err "image $image not found locally either"
     exit 1
   fi
