@@ -114,6 +114,13 @@ class Engine:
         actions = self.state.plan_actions(
             self.manifest, selected_ids, config_values, forced_refresh
         )
+        # Re-register services for installed components missing from the
+        # catalog. Heals stacks that were originally installed before the
+        # engine could resolve a Consul ACL token (services were created
+        # anonymously, ACL rejected the writes, components got marked
+        # installed anyway, and the next run NOOP'd them — leaving the
+        # catalog empty forever).
+        self._catchup_registrations()
         prefix = self.manifest.consul.service_prefix
         materialized: dict[str, MaterializedSecret] = {}
         if self.vault is not None:
@@ -431,6 +438,44 @@ class Engine:
         if host_manifest:
             env["WIZ_MANIFEST_DIR"] = host_manifest
         return env
+
+    def _catchup_registrations(self) -> None:
+        """Re-register installed components whose services are missing.
+
+        Idempotent: probes the catalog first via discover() and only writes
+        for services that aren't there. Uses only the agent API — no
+        synthetic node entries, no catalog.register fallback. On stacks
+        with a clean catalog this is silent.
+        """
+        if self.consul is None:
+            return
+        installed = self.state.installed()
+        for component in self.manifest.topo_order():
+            if component.id not in installed:
+                continue
+            for svc in component.all_consul_services():
+                try:
+                    if self.consul.discover(svc) is not None:
+                        continue
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "%s: catchup discover %s failed: %s",
+                        component.id, svc.name, exc,
+                    )
+                    continue
+                try:
+                    self.consul.register_service(
+                        component, svc, node_address=self._node_ip,
+                    )
+                    log.info(
+                        "%s: catchup-registered in consul as %s",
+                        component.id, svc.name,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "%s: catchup register %s failed: %s",
+                        component.id, svc.name, exc,
+                    )
 
     def _kv_payload(
         self, config_values: dict[str, Any], component: Component
