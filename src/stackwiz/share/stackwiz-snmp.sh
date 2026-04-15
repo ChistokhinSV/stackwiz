@@ -43,13 +43,24 @@ _stackwiz_snmp_vault_get() {
     addr="$(_stackwiz_snmp_vault_addr)"
     token="$(_stackwiz_snmp_vault_token)"
     [ -z "$token" ] && return 1
+    # All keys now use the snmp_ prefix. For backward-compat with entries
+    # written by previous versions (auth_protocol / auth_key / priv_protocol
+    # / priv_key), fall back to the un-prefixed names when a prefixed one
+    # is missing. A subsequent write will migrate to the canonical names.
     curl -sfk -H "X-Vault-Token: ${token}" \
         "${addr}/v1/stackwiz/data/${STACKWIZ_SNMP_VAULT_PATH}" 2>/dev/null \
         | python3 -c 'import sys,json
 d=json.load(sys.stdin).get("data",{}).get("data",{})
-if d.get("auth_key"):
-    for k in ("snmp_user","auth_protocol","auth_key","priv_protocol","priv_key"):
-        print(d.get(k,""))
+def pick(new, old):
+    v = d.get(new)
+    return v if v not in (None, "") else d.get(old, "")
+auth_key = pick("snmp_auth_key", "auth_key")
+if auth_key:
+    print(d.get("snmp_user", ""))
+    print(pick("snmp_auth_protocol", "auth_protocol"))
+    print(auth_key)
+    print(pick("snmp_priv_protocol", "priv_protocol"))
+    print(pick("snmp_priv_key", "priv_key"))
 ' 2>/dev/null
 }
 
@@ -60,7 +71,7 @@ _stackwiz_snmp_vault_put() {
     token="$(_stackwiz_snmp_vault_token)"
     [ -z "$token" ] && { echo "stackwiz-snmp: no vault token — cannot store keys" >&2; return 1; }
 
-    local snmp_data="{\"snmp_user\":\"${user}\",\"auth_protocol\":\"SHA\",\"auth_key\":\"${auth_key}\",\"priv_protocol\":\"AES\",\"priv_key\":\"${priv_key}\"}"
+    local snmp_data="{\"snmp_user\":\"${user}\",\"snmp_auth_protocol\":\"SHA\",\"snmp_auth_key\":\"${auth_key}\",\"snmp_priv_protocol\":\"AES\",\"snmp_priv_key\":\"${priv_key}\"}"
 
     # Fleet-wide template (backward compat + source for new VMs).
     curl -sfk -X PUT -H "X-Vault-Token: ${token}" \
@@ -92,6 +103,10 @@ _stackwiz_snmp_vault_put_host() {
 import json,sys
 existing = json.loads('''${existing}''')
 snmp = json.loads('''${snmp_data}''')
+# Migration: drop any un-prefixed legacy SNMP keys so they don't linger
+# alongside the new snmp_ entries after rename.
+for k in ('auth_protocol','auth_key','priv_protocol','priv_key'):
+    existing.pop(k, None)
 existing.update(snmp)
 print(json.dumps(existing))
 " 2>/dev/null || echo "$snmp_data")"
@@ -134,7 +149,7 @@ stackwiz_snmp_install() {
         _addr="$(_stackwiz_snmp_vault_addr)"
         _token="$(_stackwiz_snmp_vault_token)"
         if [ -n "$_token" ]; then
-            local _snmp_data="{\"snmp_user\":\"${snmp_user}\",\"auth_protocol\":\"${auth_proto}\",\"auth_key\":\"${auth_key}\",\"priv_protocol\":\"${priv_proto}\",\"priv_key\":\"${priv_key}\"}"
+            local _snmp_data="{\"snmp_user\":\"${snmp_user}\",\"snmp_auth_protocol\":\"${auth_proto}\",\"snmp_auth_key\":\"${auth_key}\",\"snmp_priv_protocol\":\"${priv_proto}\",\"snmp_priv_key\":\"${priv_key}\"}"
             _stackwiz_snmp_vault_put_host "$_addr" "$_token" "$_snmp_data"
         fi
     else
