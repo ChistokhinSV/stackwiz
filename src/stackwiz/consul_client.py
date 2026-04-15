@@ -73,6 +73,9 @@ class ConsulClient:
                     interval=svc.check.interval,
                     timeout=svc.check.timeout,
                 )
+        # python-consul2's agent endpoints don't inherit the constructor
+        # token — it has to be passed per-call. Without this, ACL-enforcing
+        # Consul rejects registration as anonymous.
         self._client.agent.service.register(
             name=svc.name,
             service_id=f"{svc.name}-{component.id}",
@@ -81,6 +84,7 @@ class ConsulClient:
             tags=list(svc.tags),
             meta=dict(svc.meta) if svc.meta else None,
             check=check,
+            token=self._token,
         )
 
     def deregister_service(
@@ -93,13 +97,15 @@ class ConsulClient:
         )
         for svc in candidates:
             try:
-                self._client.agent.service.deregister(f"{svc.name}-{component.id}")
+                self._client.agent.service.deregister(
+                    f"{svc.name}-{component.id}", token=self._token,
+                )
             except Exception:  # noqa: BLE001 — idempotent teardown
                 pass
 
     def discover(self, service: ConsulService | str) -> CatalogEntry | None:
         name = service.name if isinstance(service, ConsulService) else service
-        _, nodes = self._client.catalog.service(name)
+        _, nodes = self._client.catalog.service(name, token=self._token)
         if not nodes:
             return None
         node = nodes[0]
@@ -113,14 +119,14 @@ class ConsulClient:
     # --- KV (non-secret config) -------------------------------------------------
 
     def kv_put(self, key: str, value: str) -> None:
-        self._client.kv.put(key, value)
+        self._client.kv.put(key, value, token=self._token)
 
     def kv_get(self, key: str) -> str | None:
-        _, data = self._client.kv.get(key)
+        _, data = self._client.kv.get(key, token=self._token)
         if data is None:
             return None
         val = data.get("Value")
         return val.decode("utf-8") if isinstance(val, (bytes, bytearray)) else val
 
     def kv_delete_tree(self, prefix: str) -> None:
-        self._client.kv.delete(prefix, recurse=True)
+        self._client.kv.delete(prefix, recurse=True, token=self._token)
