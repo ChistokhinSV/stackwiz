@@ -22,6 +22,7 @@ class ConsulClient:
 
     def __init__(self, address: str, token: str | None = None) -> None:
         self.address = address.rstrip("/")
+        self._token = token
         parsed = urlparse(address if "://" in address else f"http://{address}")
         self._client = consul.Consul(
             host=parsed.hostname or "127.0.0.1",
