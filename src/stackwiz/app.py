@@ -45,7 +45,7 @@ def _read_sibling_state_token(state_dir: Path, filename: str) -> str | None:
     return None
 
 
-def _resolve_consul_token(state_dir: Path, vault: "VaultClient | None") -> str | None:
+def _resolve_consul_token(state_dir: Path, vault: VaultClient | None) -> str | None:
     """Token resolution order: own state > CONSUL_HTTP_TOKEN env > sibling
     state dirs > Vault ``shared/consul_bootstrap_token`` > anonymous."""
     own = state_dir / "consul-http-token"
