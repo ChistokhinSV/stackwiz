@@ -5,14 +5,13 @@
 #     stackwiz_snmp_install
 #
 # Installs snmpd with SNMPv3 authPriv (SHA + AES). Credentials are
-# stored in Vault at stackwiz/data/shared/snmpv3 — generated on first
-# run, reused across all VMs so a single credential set monitors the
-# entire fleet.
+# stored per-host in Vault at stackwiz/data/shared/hosts/<hostname>
+# alongside any other host-scoped secrets (ssh_* etc.) — each VM has
+# its own set, so the monitoring system must track per-host creds.
 #
 # Requires: VAULT_ADDR set, vault-token readable in state dir.
 
 STACKWIZ_SNMP_USER="stackwiz"
-STACKWIZ_SNMP_VAULT_PATH="shared/snmpv3"
 
 _stackwiz_snmp_vault_addr() {
     local addr="${VAULT_ADDR:-}"
@@ -38,17 +37,24 @@ _stackwiz_snmp_vault_token() {
     echo ""
 }
 
+_stackwiz_snmp_host_path() {
+    local hostname
+    hostname="$(hostname -s 2>/dev/null || hostname)"
+    echo "shared/hosts/${hostname}"
+}
+
+# Reads SNMP creds from the per-host entry and emits 5 lines:
+#   snmp_user / auth_protocol / auth_key / priv_protocol / priv_key
+# Falls back to un-prefixed legacy keys to support entries written by
+# pre-prefix versions; the next write migrates them.
 _stackwiz_snmp_vault_get() {
-    local addr token
+    local addr token host_path
     addr="$(_stackwiz_snmp_vault_addr)"
     token="$(_stackwiz_snmp_vault_token)"
     [ -z "$token" ] && return 1
-    # All keys now use the snmp_ prefix. For backward-compat with entries
-    # written by previous versions (auth_protocol / auth_key / priv_protocol
-    # / priv_key), fall back to the un-prefixed names when a prefixed one
-    # is missing. A subsequent write will migrate to the canonical names.
+    host_path="$(_stackwiz_snmp_host_path)"
     curl -sfk -H "X-Vault-Token: ${token}" \
-        "${addr}/v1/stackwiz/data/${STACKWIZ_SNMP_VAULT_PATH}" 2>/dev/null \
+        "${addr}/v1/stackwiz/data/${host_path}" 2>/dev/null \
         | python3 -c 'import sys,json
 d=json.load(sys.stdin).get("data",{}).get("data",{})
 def pick(new, old):
@@ -64,47 +70,28 @@ if auth_key:
 ' 2>/dev/null
 }
 
+# Merge SNMP creds into the per-host secret. Preserves unrelated keys
+# (ssh_*, etc.) and drops any legacy un-prefixed SNMP keys.
 _stackwiz_snmp_vault_put() {
     local user="$1" auth_key="$2" priv_key="$3"
-    local addr token
+    local addr token host_path
     addr="$(_stackwiz_snmp_vault_addr)"
     token="$(_stackwiz_snmp_vault_token)"
     [ -z "$token" ] && { echo "stackwiz-snmp: no vault token — cannot store keys" >&2; return 1; }
+    host_path="$(_stackwiz_snmp_host_path)"
 
     local snmp_data="{\"snmp_user\":\"${user}\",\"snmp_auth_protocol\":\"SHA\",\"snmp_auth_key\":\"${auth_key}\",\"snmp_priv_protocol\":\"AES\",\"snmp_priv_key\":\"${priv_key}\"}"
 
-    # Fleet-wide template (backward compat + source for new VMs).
-    curl -sfk -X PUT -H "X-Vault-Token: ${token}" \
-        -H "Content-Type: application/json" \
-        "${addr}/v1/stackwiz/data/${STACKWIZ_SNMP_VAULT_PATH}" \
-        -d "{\"data\":${snmp_data}}" \
-        >/dev/null 2>&1
-
-    # Per-host entry: merge SNMP keys into the host's existing secret
-    # (preserves SSH keys etc. if already stored there).
-    _stackwiz_snmp_vault_put_host "$addr" "$token" "$snmp_data"
-}
-
-_stackwiz_snmp_vault_put_host() {
-    local addr="$1" token="$2" snmp_data="$3"
-    local hostname
-    hostname="$(hostname -s 2>/dev/null || hostname)"
-    local host_path="shared/hosts/${hostname}"
-
-    # Read existing host secret (may have ssh_* keys etc.)
     local existing
     existing="$(curl -sfk -H "X-Vault-Token: ${token}" \
         "${addr}/v1/stackwiz/data/${host_path}" 2>/dev/null \
         | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin).get("data",{}).get("data",{})))' 2>/dev/null || echo '{}')"
 
-    # Merge: existing keys + new SNMP keys (SNMP wins on conflict).
     local merged
     merged="$(python3 -c "
 import json,sys
 existing = json.loads('''${existing}''')
 snmp = json.loads('''${snmp_data}''')
-# Migration: drop any un-prefixed legacy SNMP keys so they don't linger
-# alongside the new snmp_ entries after rename.
 for k in ('auth_protocol','auth_key','priv_protocol','priv_key'):
     existing.pop(k, None)
 existing.update(snmp)
@@ -143,15 +130,9 @@ stackwiz_snmp_install() {
         auth_key="$(echo "$vault_data" | sed -n '3p')"
         priv_proto="$(echo "$vault_data" | sed -n '4p')"
         priv_key="$(echo "$vault_data" | sed -n '5p')"
-        echo "stackwiz-snmp: using existing credentials from Vault"
-        # Always ensure per-host entry exists (may be a new VM reusing fleet creds).
-        local _addr _token
-        _addr="$(_stackwiz_snmp_vault_addr)"
-        _token="$(_stackwiz_snmp_vault_token)"
-        if [ -n "$_token" ]; then
-            local _snmp_data="{\"snmp_user\":\"${snmp_user}\",\"snmp_auth_protocol\":\"${auth_proto}\",\"snmp_auth_key\":\"${auth_key}\",\"snmp_priv_protocol\":\"${priv_proto}\",\"snmp_priv_key\":\"${priv_key}\"}"
-            _stackwiz_snmp_vault_put_host "$_addr" "$_token" "$_snmp_data"
-        fi
+        echo "stackwiz-snmp: using existing per-host credentials from Vault"
+        # Re-write so any legacy un-prefixed keys are migrated out.
+        _stackwiz_snmp_vault_put "$snmp_user" "$auth_key" "$priv_key" >/dev/null 2>&1 || true
     else
         snmp_user="${STACKWIZ_SNMP_USER}"
         auth_proto="SHA"
