@@ -404,13 +404,6 @@ class Engine:
             # Re-probe on demand: a component earlier in this run may have
             # registered the service, so querying the catalog NOW (not at
             # engine startup) is what makes same-run discovery work.
-            #
-            # Also retry registration for any *already-installed* component
-            # whose services are missing from the catalog. This catches the
-            # case where an earlier install ran before consul was reachable
-            # (or before the stackwiz version that auto-registers), and is
-            # cheap: at most one catalog probe per installed service.
-            self._catchup_registrations(component)
             for discover in component.consul_discover:
                 entry = self.consul.discover(discover.service)
                 if entry is not None:
@@ -438,65 +431,6 @@ class Engine:
         if host_manifest:
             env["WIZ_MANIFEST_DIR"] = host_manifest
         return env
-
-    def _catchup_registrations(self, current: Component) -> None:
-        """Re-register services for installed components missing from catalog.
-
-        Runs right before a component's ``consul_discover`` probes. Covers
-        installs that happened when Consul wasn't reachable / the stackwiz
-        version didn't register yet, and cross-host deployments where the
-        original agent API register was silently rejected.
-        """
-        if self.consul is None:
-            return
-        installed = self.state.installed()
-        for earlier in self.manifest.topo_order():
-            if earlier.id == current.id:
-                break
-            if earlier.id not in installed:
-                continue
-            for svc in earlier.all_consul_services():
-                if self.consul.discover(svc) is not None:
-                    log.debug("%s: %s already in catalog", earlier.id, svc.name)
-                    continue
-                log.info(
-                    "%s: %s missing from catalog — attempting catchup register "
-                    "at %s:%d",
-                    earlier.id, svc.name, self._node_ip, svc.port,
-                )
-                try:
-                    self.consul.register_service(
-                        earlier, svc, node_address=self._node_ip,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    log.warning(
-                        "%s: agent register %s failed: %s — trying catalog.register",
-                        earlier.id, svc.name, exc,
-                    )
-                # Verify via catalog. If still missing, fall back to the
-                # /v1/catalog/register endpoint which writes an external
-                # service entry directly to the catalog (works for
-                # cross-host deploys where the target consul is not THIS
-                # node's local agent).
-                if self.consul.discover(svc) is None:
-                    try:
-                        self.consul.catalog_register(
-                            earlier, svc, node_address=self._node_ip,
-                        )
-                        log.info(
-                            "%s: catchup-registered via catalog API (%s at %s:%d)",
-                            earlier.id, svc.name, self._node_ip, svc.port,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning(
-                            "%s: catalog.register %s failed: %s",
-                            earlier.id, svc.name, exc,
-                        )
-                else:
-                    log.info(
-                        "%s: catchup-registered in consul as %s",
-                        earlier.id, svc.name,
-                    )
 
     def _kv_payload(
         self, config_values: dict[str, Any], component: Component
