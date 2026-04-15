@@ -444,7 +444,8 @@ class Engine:
 
         Runs right before a component's ``consul_discover`` probes. Covers
         installs that happened when Consul wasn't reachable / the stackwiz
-        version didn't register yet.
+        version didn't register yet, and cross-host deployments where the
+        original agent API register was silently rejected.
         """
         if self.consul is None:
             return
@@ -455,17 +456,47 @@ class Engine:
             if earlier.id not in installed:
                 continue
             for svc in earlier.all_consul_services():
+                if self.consul.discover(svc) is not None:
+                    log.debug("%s: %s already in catalog", earlier.id, svc.name)
+                    continue
+                log.info(
+                    "%s: %s missing from catalog — attempting catchup register "
+                    "at %s:%d",
+                    earlier.id, svc.name, self._node_ip, svc.port,
+                )
                 try:
-                    if self.consul.discover(svc) is not None:
-                        continue
                     self.consul.register_service(
                         earlier, svc, node_address=self._node_ip,
                     )
-                    log.info("%s: catchup-registered in consul as %s",
-                             earlier.id, svc.name)
                 except Exception as exc:  # noqa: BLE001
-                    log.warning("%s: catchup consul register %s failed: %s",
-                                earlier.id, svc.name, exc)
+                    log.warning(
+                        "%s: agent register %s failed: %s — trying catalog.register",
+                        earlier.id, svc.name, exc,
+                    )
+                # Verify via catalog. If still missing, fall back to the
+                # /v1/catalog/register endpoint which writes an external
+                # service entry directly to the catalog (works for
+                # cross-host deploys where the target consul is not THIS
+                # node's local agent).
+                if self.consul.discover(svc) is None:
+                    try:
+                        self.consul.catalog_register(
+                            earlier, svc, node_address=self._node_ip,
+                        )
+                        log.info(
+                            "%s: catchup-registered via catalog API (%s at %s:%d)",
+                            earlier.id, svc.name, self._node_ip, svc.port,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "%s: catalog.register %s failed: %s",
+                            earlier.id, svc.name, exc,
+                        )
+                else:
+                    log.info(
+                        "%s: catchup-registered in consul as %s",
+                        earlier.id, svc.name,
+                    )
 
     def _kv_payload(
         self, config_values: dict[str, Any], component: Component

@@ -1,6 +1,8 @@
 """Consul wrapper: service register/deregister + non-secret KV config."""
 from __future__ import annotations
 
+import json
+import urllib.request
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -82,6 +84,79 @@ class ConsulClient:
             meta=dict(svc.meta) if svc.meta else None,
             check=check,
         )
+
+    def catalog_register(
+        self,
+        component: Component,
+        service: ConsulService | None = None,
+        node_address: str = "127.0.0.1",
+    ) -> None:
+        """Register an external service via /v1/catalog/register.
+
+        Unlike ``register_service`` (which hits the local agent's
+        ``/v1/agent/service/register`` endpoint and ties the service to
+        THIS agent's node), catalog.register writes directly to the
+        catalog under an arbitrary node id. Used for cross-host deploys
+        where the target Consul has no local agent for this node — e.g.
+        061's AWX VM registering awx-api against the 081 VM's Consul.
+        """
+        svc = service or component.consul_service
+        if svc is None:
+            return
+        node_name = f"stackwiz-{node_address.replace('.', '-')}"
+        payload: dict[str, object] = {
+            "Node": node_name,
+            "Address": node_address,
+            "SkipNodeUpdate": True,
+            "Service": {
+                "ID": f"{svc.name}-{component.id}",
+                "Service": svc.name,
+                "Address": node_address,
+                "Port": svc.port,
+                "Tags": list(svc.tags),
+            },
+        }
+        if svc.meta:
+            payload["Service"]["Meta"] = dict(svc.meta)  # type: ignore[index]
+        if svc.check is not None:
+            check: dict[str, object] = {
+                "Node": node_name,
+                "ServiceID": f"{svc.name}-{component.id}",
+                "Name": f"{svc.name}-check",
+            }
+            if svc.check.http:
+                url = svc.check.http
+                if node_address != "127.0.0.1":
+                    url = url.replace("127.0.0.1", node_address)
+                check["Definition"] = {
+                    "HTTP": url,
+                    "Interval": svc.check.interval,
+                }
+            elif svc.check.tcp:
+                tcp = svc.check.tcp
+                if node_address != "127.0.0.1":
+                    tcp = tcp.replace("127.0.0.1", node_address)
+                check["Definition"] = {
+                    "TCP": tcp,
+                    "Interval": svc.check.interval,
+                }
+            if "Definition" in check:
+                payload["Check"] = check
+        headers = {"Content-Type": "application/json"}
+        if self._token:
+            headers["X-Consul-Token"] = self._token
+        req = urllib.request.Request(
+            f"{self.address}/v1/catalog/register",
+            data=json.dumps(payload).encode(),
+            method="PUT",
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status >= 300:
+                raise RuntimeError(
+                    f"catalog.register HTTP {resp.status}: "
+                    f"{resp.read().decode('utf-8', 'replace')}"
+                )
 
     def deregister_service(
         self,
