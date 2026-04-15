@@ -47,25 +47,63 @@ def _read_sibling_state_token(state_dir: Path, filename: str) -> str | None:
 
 def _resolve_consul_token(state_dir: Path, vault: VaultClient | None) -> str | None:
     """Token resolution order: own state > CONSUL_HTTP_TOKEN env > sibling
-    state dirs > Vault ``shared/consul_bootstrap_token`` > anonymous."""
+    state dirs > Vault ``shared/consul_bootstrap_token`` > anonymous.
+
+    On a successful non-trivial resolution (env / sibling / Vault), the token
+    is cached at ``<state_dir>/consul-http-token`` so subsequent runs skip the
+    fallback chain. This also makes cross-consumer deploys work even after the
+    operator removes the env var or 081 is uninstalled.
+    """
     own = state_dir / "consul-http-token"
     if own.exists():
         value = own.read_text().strip()
         if value:
             return value
+
+    def _cache(token: str) -> str:
+        try:
+            state_dir.mkdir(parents=True, exist_ok=True)
+            own.write_text(token, encoding="utf-8")
+            try:
+                own.chmod(0o600)
+            except OSError:
+                pass
+        except OSError:
+            pass
+        return token
+
     env_value = os.environ.get("CONSUL_HTTP_TOKEN", "").strip()
     if env_value:
-        return env_value
+        return _cache(env_value)
     sibling = _read_sibling_state_token(state_dir, "consul-http-token")
     if sibling:
-        return sibling
-    if vault is not None:
+        return _cache(sibling)
+    # Try the engine-built Vault client first.
+    candidates: list[VaultClient] = []
+    if vault is not None and getattr(vault, "_token", None):
+        candidates.append(vault)
+    # Fallback: build a one-shot Vault client from the operator's
+    # VAULT_TOKEN env (set by bootstrap.sh) so the resolver can reach
+    # shared/consul_bootstrap_token even when the engine itself failed
+    # to acquire a vault token.
+    env_vault_token = os.environ.get("VAULT_TOKEN", "").strip()
+    if env_vault_token:
+        vault_addr = (
+            os.environ.get("VAULT_ADDR", "").strip()
+            or (vault.address if vault is not None else "")
+        )
+        if vault_addr:
+            try:
+                candidates.append(VaultClient(vault_addr, token=env_vault_token))
+            except Exception:  # noqa: BLE001
+                pass
+    for vc in candidates:
         try:
-            data = vault.kv_get("shared/consul_bootstrap_token")
+            data = vc.kv_get("shared/consul_bootstrap_token")
             if data and data.get("value"):
-                return str(data["value"])
+                return _cache(str(data["value"]))
         except Exception:  # noqa: BLE001
-            pass
+            continue
     return None
 
 
