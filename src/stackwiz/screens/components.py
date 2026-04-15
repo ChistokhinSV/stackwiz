@@ -108,5 +108,5 @@ class ComponentsScreen(Screen):
             from stackwiz.screens.progress import ProgressScreen
             self.app.push_screen(ProgressScreen())
         else:
-            from stackwiz.screens.config import ConfigScreen
-            self.app.push_screen(ConfigScreen())
+            from stackwiz.screens.domain import DomainScreen
+            self.app.push_screen(DomainScreen())

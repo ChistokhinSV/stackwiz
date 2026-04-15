@@ -121,6 +121,35 @@ def _resolve_node_ip(domain: str) -> str:
     return ""
 
 
+def rederive_for_domain(
+    manifest: Manifest,
+    current_values: dict[str, Any],
+    new_domain: str,
+) -> dict[str, Any]:
+    """Re-interpolate every derived field against a new `domain`.
+
+    Used by the TUI after the operator types a domain on the first screen:
+    the second screen's pre-filled values must reflect `auth.${domain}` etc.
+    resolved against the new value.
+
+    Semantics:
+      - `domain` itself is set to `new_domain`.
+      - `domain_dn` is recomputed from `new_domain`.
+      - Every field flagged ``derived`` is re-rendered from its manifest
+        default (blowing away any stale resolved value in current_values).
+      - Non-derived fields are preserved as-is — operator intent wins.
+    """
+    merged = dict(current_values)
+    merged["domain"] = new_domain
+    merged["domain_dn"] = _domain_to_dn(new_domain)
+    for field in manifest.config:
+        if field.is_derived and field.default is not None:
+            merged[field.id] = field.default
+    resolved = _recursive_interpolate(merged)
+    resolved["domain_dn"] = _domain_to_dn(str(resolved.get("domain", new_domain)))
+    return _recursive_interpolate(resolved)
+
+
 def effective_config(
     manifest: Manifest,
     state_config: dict[str, Any],

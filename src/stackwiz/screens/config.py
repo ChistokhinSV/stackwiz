@@ -31,11 +31,18 @@ class ConfigScreen(Screen):
             yield Label("[b]Configuration[/b]")
             state = self.installer.state
             yield Static(
+                f"Domain: [cyan]{self.installer.effective_domain}[/cyan] "
+                "(change on the previous screen to re-derive all hostnames)"
+            )
+            yield Static(
                 "Priority: .stackwiz.env > saved state > manifest defaults. "
                 f"Values saved to {state.host_path('config.yaml')} on Next."
             )
             existing = self._initial_values()
             for field in self.installer.manifest.config:
+                # `domain` is handled by the dedicated DomainScreen; skip here.
+                if field.id == "domain":
+                    continue
                 default = existing.get(field.id, field.default)
                 yield Label(
                     f"{field.label}"
@@ -98,7 +105,11 @@ class ConfigScreen(Screen):
     def action_proceed(self) -> None:
         values: dict[str, Any] = {}
         missing: list[str] = []
+        # Preserve the domain set on DomainScreen (no widget for it here).
+        values["domain"] = self.installer.effective_domain
         for field in self.installer.manifest.config:
+            if field.id == "domain":
+                continue
             wid = f"#cfg-{field.id}"
             widget = self.query_one(wid)
             value: Any
