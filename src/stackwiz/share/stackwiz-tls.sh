@@ -45,6 +45,18 @@ stackwiz_tls_cert_fresh() {
     openssl x509 -checkend "$window" -noout -in "$cert" >/dev/null 2>&1
 }
 
+# Returns 0 if any Let's Encrypt path is actually viable right now.
+# Used to decide whether to reuse a self-signed cert: if LE is newly
+# reachable (credentials just arrived), reusing a stale self-signed would
+# lock the host into self-signed forever despite DNS-01 being available.
+stackwiz_tls_le_available() {
+    [ "${STACKWIZ_TLS_MODE:-auto}" = "self-signed" ] && return 1
+    [ -n "${CF_DNS_API_TOKEN:-}" ] && return 0
+    [ -n "${AWS_DNS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_DNS_SECRET_ACCESS_KEY:-}" ] && return 0
+    [ "${STACKWIZ_TLS_ALLOW_HTTP01:-0}" = "1" ] && return 0
+    return 1
+}
+
 # Idempotency check — emits CERT_PATH/KEY_PATH in caller's env and returns 0
 # if an existing cert is still fresh.
 stackwiz_tls_reuse_existing() {
@@ -62,6 +74,14 @@ stackwiz_tls_reuse_existing() {
         CERT_PATH="$le_cert"; KEY_PATH="$le_key"
         echo "stackwiz-tls: reusing Let's Encrypt cert for ${host} (>30 days remaining)"
         return 0
+    fi
+
+    # Only reuse a self-signed cert if LE is not reachable right now. If CF
+    # / Route53 creds have arrived since the self-signed cert was generated,
+    # fall through so the LE ladder runs and upgrades the host.
+    if stackwiz_tls_cert_fresh "$ss_cert" && stackwiz_tls_le_available; then
+        echo "stackwiz-tls: self-signed cert exists for ${host} but LE credentials are available; trying LE upgrade"
+        return 1
     fi
     if stackwiz_tls_cert_fresh "$ss_cert"; then
         CERT_PATH="$ss_cert"; KEY_PATH="$ss_key"
@@ -85,7 +105,10 @@ stackwiz_tls_ensure_certbot() {
 
 stackwiz_tls_try_cloudflare() {
     local host="$1" email="$2"
-    [ -n "${CF_DNS_API_TOKEN:-}" ] || return 1
+    if [ -z "${CF_DNS_API_TOKEN:-}" ]; then
+        echo "stackwiz-tls: skipping Cloudflare DNS-01 (CF_DNS_API_TOKEN not set)"
+        return 1
+    fi
     stackwiz_tls_ensure_certbot || return 1
     local le_cert le_key creds
     read -r le_cert le_key < <(stackwiz_tls_le_paths "$host")
@@ -110,8 +133,10 @@ stackwiz_tls_try_cloudflare() {
 
 stackwiz_tls_try_route53() {
     local host="$1" email="$2"
-    [ -n "${AWS_DNS_ACCESS_KEY_ID:-}" ] || return 1
-    [ -n "${AWS_DNS_SECRET_ACCESS_KEY:-}" ] || return 1
+    if [ -z "${AWS_DNS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_DNS_SECRET_ACCESS_KEY:-}" ]; then
+        echo "stackwiz-tls: skipping Route53 DNS-01 (AWS_DNS_ACCESS_KEY_ID / AWS_DNS_SECRET_ACCESS_KEY not set)"
+        return 1
+    fi
     stackwiz_tls_ensure_certbot || return 1
     local le_cert le_key
     read -r le_cert le_key < <(stackwiz_tls_le_paths "$host")
