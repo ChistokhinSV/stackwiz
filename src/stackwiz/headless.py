@@ -61,30 +61,29 @@ async def _run(
     consul_probe = await probe_consul(effective_domain, manifest.consul_host)
     vault_probe = await probe_vault(effective_domain, manifest.vault_host)
 
+    from stackwiz.app import _read_sibling_state_token, _resolve_consul_token
+
     consul_client: ConsulClient | None = None
     vault_client: VaultClient | None = None
-    if consul_probe.reachable and consul_probe.address:
-        consul_token_file = state_dir / "consul-http-token"
-        consul_token = (
-            consul_token_file.read_text().strip()
-            if consul_token_file.exists() else None
-        )
-        if not consul_token:
-            consul_token = os.environ.get("CONSUL_HTTP_TOKEN", "").strip() or None
-        consul_client = ConsulClient(consul_probe.address, token=consul_token)
-        print(f"[auto] consul: {consul_probe.address} ({consul_probe.source.value})"
-              f"{' (ACL token)' if consul_token else ' (no ACL token)'}")
-    else:
-        print(f"[auto] consul: not reachable ({consul_probe.detail})")
+    # Build Vault first — it's a fallback source for the Consul ACL token.
     if vault_probe.reachable and vault_probe.address:
         token_file = state_dir / "vault-token"
         token = token_file.read_text().strip() if token_file.exists() else None
         if not token:
             token = os.environ.get("VAULT_TOKEN", "").strip() or None
+        if not token:
+            token = _read_sibling_state_token(state_dir, "vault-token")
         vault_client = VaultClient(vault_probe.address, token=token)
         print(f"[auto] vault: {vault_probe.address} ({vault_probe.source.value})")
     else:
         print(f"[auto] vault: not reachable ({vault_probe.detail})")
+    if consul_probe.reachable and consul_probe.address:
+        consul_token = _resolve_consul_token(state_dir, vault_client)
+        consul_client = ConsulClient(consul_probe.address, token=consul_token)
+        print(f"[auto] consul: {consul_probe.address} ({consul_probe.source.value})"
+              f"{' (ACL token)' if consul_token else ' (no ACL token)'}")
+    else:
+        print(f"[auto] consul: not reachable ({consul_probe.detail})")
 
     component_ids = {c.id for c in manifest.components}
     if mode == "install":

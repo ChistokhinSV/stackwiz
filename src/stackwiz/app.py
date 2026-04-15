@@ -18,6 +18,57 @@ from stackwiz.vault_client import VaultClient
 Mode = Literal["install", "uninstall"]
 
 
+def _read_sibling_state_token(state_dir: Path, filename: str) -> str | None:
+    """Search sibling consumer state dirs for ``filename``.
+
+    Namespaced state means each consumer owns its own dir
+    (``/var/lib/stackwiz/awx-platform/``, ``.../consul-vault-authentik-docker/``
+    etc.). Cross-consumer secrets (a consul ACL token written by 081, needed
+    by 061) live in one of those siblings. Falling back to a sibling is safe
+    — all namespaces on the same host share the same Vault/Consul backend.
+    Cross-host installs must provide the token via env or Vault shared path.
+    """
+    base = state_dir.parent
+    if not base.exists():
+        return None
+    for sibling in sorted(base.iterdir()):
+        if sibling == state_dir or not sibling.is_dir():
+            continue
+        candidate = sibling / filename
+        if candidate.exists():
+            try:
+                value = candidate.read_text().strip()
+                if value:
+                    return value
+            except OSError:
+                continue
+    return None
+
+
+def _resolve_consul_token(state_dir: Path, vault: "VaultClient | None") -> str | None:
+    """Token resolution order: own state > CONSUL_HTTP_TOKEN env > sibling
+    state dirs > Vault ``shared/consul_bootstrap_token`` > anonymous."""
+    own = state_dir / "consul-http-token"
+    if own.exists():
+        value = own.read_text().strip()
+        if value:
+            return value
+    env_value = os.environ.get("CONSUL_HTTP_TOKEN", "").strip()
+    if env_value:
+        return env_value
+    sibling = _read_sibling_state_token(state_dir, "consul-http-token")
+    if sibling:
+        return sibling
+    if vault is not None:
+        try:
+            data = vault.kv_get("shared/consul_bootstrap_token")
+            if data and data.get("value"):
+                return str(data["value"])
+        except Exception:  # noqa: BLE001
+            pass
+    return None
+
+
 class InstallerApp(App[int]):
     """Top-level Textual application."""
 
@@ -116,25 +167,13 @@ class InstallerApp(App[int]):
         403 on any Vault operation because `VaultClient(addr)` alone falls back
         to the VAULT_TOKEN env var, which is typically empty on re-runs.
         """
-        if self.consul_probe and self.consul_probe.reachable and self.consul_probe.address:
-            # ACL-enabled consul needs a token. Try local file first,
-            # then CONSUL_HTTP_TOKEN env (passed by bootstrap.sh).
-            consul_token_file = self.state_dir / "consul-http-token"
-            consul_token = (
-                consul_token_file.read_text().strip()
-                if consul_token_file.exists() else None
-            )
-            if not consul_token:
-                consul_token = (
-                    os.environ.get("CONSUL_HTTP_TOKEN", "").strip()
-                    or None
-                )
-            self.consul_client = ConsulClient(
-                self.consul_probe.address, token=consul_token
-            )
+        # Build the Vault client first — it is the fallback source for the
+        # Consul ACL token on consumers that don't own consul themselves.
         if self.vault_probe and self.vault_probe.reachable and self.vault_probe.address:
             token_file = self.state_dir / "vault-token"
             token = token_file.read_text().strip() if token_file.exists() else None
+            if not token:
+                token = _read_sibling_state_token(self.state_dir, "vault-token")
             self.vault_client = VaultClient(self.vault_probe.address, token=token)
             # Re-runs need the KV mount to exist (first run enables it lazily
             # after vault installs; subsequent runs should re-ensure idempotently).
@@ -142,3 +181,9 @@ class InstallerApp(App[int]):
                 self.vault_client.ensure_kv_mount()
             except Exception:  # noqa: BLE001 — non-fatal; engine will log if it later fails
                 pass
+
+        if self.consul_probe and self.consul_probe.reachable and self.consul_probe.address:
+            consul_token = _resolve_consul_token(self.state_dir, self.vault_client)
+            self.consul_client = ConsulClient(
+                self.consul_probe.address, token=consul_token
+            )
