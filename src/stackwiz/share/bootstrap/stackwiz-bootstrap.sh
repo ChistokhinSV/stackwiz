@@ -58,6 +58,43 @@ sw_log() { echo "[bootstrap] $*"; }
 sw_warn() { echo "warn: $*" >&2; }
 sw_err() { echo "error: $*" >&2; }
 
+# Vault preflight for per-component installers.
+#
+# Use from install/*.sh like:
+#
+#   . "${STATE_DIR}/bin/stackwiz-bootstrap.sh"
+#   sw_require_vault  # hard-errors with an actionable message if Vault
+#                     # is unreachable or the token lacks auth
+#
+# Why: without this, an installer that reads secrets via the vault
+# client silently gets empty strings and bakes them into containers —
+# install "succeeds" but runtime is broken. Surfacing the failure at
+# install time is ~100x cheaper to debug.
+sw_require_vault() {
+  local who="${1:-installer}"
+  if [ -z "${VAULT_ADDR:-}" ]; then
+    sw_err "${who}: VAULT_ADDR not set — Vault discovery failed"
+    sw_err "       check 'bootstrap.sh info' output for 'discovered Vault at ...' line;"
+    sw_err "       if missing, export CONSUL_HTTP_TOKEN or persist one at"
+    sw_err "       ${STACKWIZ_STATE_DIR}/consul-http-token and re-run."
+    exit 1
+  fi
+  if [ -z "${VAULT_TOKEN:-}" ]; then
+    sw_err "${who}: VAULT_TOKEN not set — cannot authenticate to Vault at ${VAULT_ADDR}"
+    exit 1
+  fi
+  local code
+  code=$(curl -sk -o /dev/null -w '%{http_code}' \
+    -H "X-Vault-Token: ${VAULT_TOKEN}" \
+    "${VAULT_ADDR%/}/v1/auth/token/lookup-self" 2>/dev/null || echo 000)
+  case "$code" in
+    200) : ;;  # authenticated, good
+    403) sw_err "${who}: VAULT_TOKEN lacks permission to self-lookup at ${VAULT_ADDR}"; exit 1 ;;
+    000) sw_err "${who}: Vault unreachable at ${VAULT_ADDR} (network / TLS)"; exit 1 ;;
+    *)   sw_err "${who}: Vault auth check returned HTTP ${code} at ${VAULT_ADDR}"; exit 1 ;;
+  esac
+}
+
 # Map required package binary name -> apt package name for edge cases.
 _sw_pkg_for() {
   case "$1" in
@@ -115,6 +152,44 @@ sw_bootstrap_ensure_pkgs() {
   fi
 }
 
+# Auto-load CONSUL_HTTP_TOKEN from disk if it's not already exported.
+# Consumers frequently persist the token to
+# ${STACKWIZ_STATE_DIR}/<consumer>/consul-http-token (installers write
+# it there), but SW_EXTRA_ENV=(CONSUL_HTTP_TOKEN) only forwards a value
+# that is already in the environment. Without this helper, a perfectly
+# good on-disk token is silently ignored and every downstream Consul
+# ACL check fails as the anonymous identity — which then breaks Vault
+# discovery, service discovery, and secret reads.
+sw_bootstrap_load_consul_token() {
+  [ -n "${CONSUL_HTTP_TOKEN:-}" ] && return 0
+  local cand f
+  cand=(
+    "${STACKWIZ_STATE_DIR}/consul-http-token"
+  )
+  # Also try any per-consumer subdirectory: installers write to
+  # ${STACKWIZ_STATE_DIR}/<name>/consul-http-token. Glob them all so
+  # we don't hard-code consumer names.
+  for f in "${STACKWIZ_STATE_DIR}"/*/consul-http-token; do
+    [ -f "$f" ] && cand+=("$f")
+  done
+  cand+=("/etc/stackwiz/consul-http-token" "${HOME:-/root}/.consul/http-token")
+  # Token files are typically chmod 0600 root:root so a regular-user
+  # `[ -r ]` test returns false. Don't gate on readability — probe
+  # with `sudo test -f` and read via sudo, falling back to plain cat
+  # if the file happens to be user-owned.
+  for f in "${cand[@]}"; do
+    if sudo test -f "$f" 2>/dev/null || [ -f "$f" ]; then
+      CONSUL_HTTP_TOKEN="$(sudo cat "$f" 2>/dev/null || cat "$f" 2>/dev/null || true)"
+      CONSUL_HTTP_TOKEN="${CONSUL_HTTP_TOKEN%$'\n'}"  # strip trailing newline
+      if [ -n "$CONSUL_HTTP_TOKEN" ]; then
+        export CONSUL_HTTP_TOKEN
+        sw_log "loaded CONSUL_HTTP_TOKEN from $f"
+        return 0
+      fi
+    fi
+  done
+}
+
 sw_bootstrap_discover_consul() {
   [ -n "${CONSUL_HTTP_ADDR:-}" ] && return 0
   local addr
@@ -123,6 +198,24 @@ sw_bootstrap_discover_consul() {
       CONSUL_HTTP_ADDR="$addr"
       export CONSUL_HTTP_ADDR
       sw_log "discovered Consul at ${CONSUL_HTTP_ADDR}"
+
+      # ACL preflight — if the effective token (anonymous or explicit)
+      # can't even list `consul` (every agent registers itself), no
+      # downstream service discovery will work and we'll cascade into
+      # silent failures at Vault discovery, secret reads, and registrar
+      # DNS lookups. Probe once, here, so the operator gets one clear
+      # message instead of a dozen "not found" symptoms later.
+      local hdr="" probe
+      [ -n "${CONSUL_HTTP_TOKEN:-}" ] && hdr="X-Consul-Token: ${CONSUL_HTTP_TOKEN}"
+      probe=$(curl -sf ${hdr:+-H "$hdr"} \
+        "${CONSUL_HTTP_ADDR}/v1/catalog/service/consul" 2>/dev/null || echo "[]")
+      if [ "$probe" = "[]" ] || [ -z "$probe" ]; then
+        if [ -z "${CONSUL_HTTP_TOKEN:-}" ]; then
+          sw_warn "Consul anonymous token lacks service:read — export CONSUL_HTTP_TOKEN or persist one at ${STACKWIZ_STATE_DIR}/consul-http-token; service discovery will be degraded"
+        else
+          sw_warn "Consul token lacks service:read on \"consul\" — check policy; service discovery will be degraded"
+        fi
+      fi
       return 0
     fi
   done
@@ -130,20 +223,41 @@ sw_bootstrap_discover_consul() {
 
 sw_bootstrap_discover_vault() {
   [ -n "${VAULT_ADDR:-}" ] && return 0
-  [ -z "${CONSUL_HTTP_ADDR:-}" ] && return 0
+  if [ -z "${CONSUL_HTTP_ADDR:-}" ]; then
+    sw_warn "vault discovery skipped: CONSUL_HTTP_ADDR not set (no Consul to query)"
+    return 0
+  fi
+
+  local hdr="" resp
+  [ -n "${CONSUL_HTTP_TOKEN:-}" ] && hdr="X-Consul-Token: ${CONSUL_HTTP_TOKEN}"
+  resp=$(curl -sf ${hdr:+-H "$hdr"} \
+    "${CONSUL_HTTP_ADDR}/v1/catalog/service/vault" 2>/dev/null || echo "__CURL_ERR__")
+
+  if [ "$resp" = "__CURL_ERR__" ]; then
+    sw_warn "vault discovery skipped: consul query failed (check CONSUL_HTTP_TOKEN / ACL)"
+    return 0
+  fi
+
   local svc
-  svc=$(curl -sf "${CONSUL_HTTP_ADDR}/v1/catalog/service/vault" 2>/dev/null \
-    | python3 -c "
+  svc=$(printf '%s' "$resp" | python3 -c "
 import sys,json
-r=json.load(sys.stdin)
+try:
+    r=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
 if r:
     s=r[0]; addr=s.get('ServiceAddress') or s['Address']; port=s['ServicePort']
     print(f'https://{addr}:{port}')
 " 2>/dev/null || true)
+
   if [ -n "$svc" ]; then
     VAULT_ADDR="$svc"
     export VAULT_ADDR
     sw_log "discovered Vault at ${VAULT_ADDR}"
+  elif [ "$resp" = "[]" ]; then
+    sw_warn "no Vault service registered in Consul (under tag or name 'vault') — secret reads will show (not in vault)"
+  else
+    sw_warn "vault discovery: unexpected Consul response; skipping"
   fi
 }
 
@@ -280,6 +394,9 @@ sw_bootstrap_main() {
   sw_bootstrap_source_env
   sw_bootstrap_require_sudo
   sw_bootstrap_ensure_pkgs
+  # Load on-disk token BEFORE Consul discovery so the ACL preflight in
+  # discover_consul can use it.
+  sw_bootstrap_load_consul_token
   sw_bootstrap_discover_consul
   sw_bootstrap_discover_vault
   sw_bootstrap_ensure_docker
