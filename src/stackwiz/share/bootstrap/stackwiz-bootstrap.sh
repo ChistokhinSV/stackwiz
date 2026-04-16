@@ -156,17 +156,32 @@ sw_bootstrap_ensure_docker() {
 }
 
 # Pull image; fall back to cached copy if the registry is unreachable.
-# Surfaces whether the pull actually downloaded a newer image or the local
-# copy was already current, using docker's own Status: line. On failure,
-# surface the underlying docker error (auth / DNS / rate-limit / not-found)
-# instead of a generic "registry unreachable".
+# Streams docker pull progress (layer download bars, status messages) to
+# the operator's terminal — tee'd into a temp file so we can still parse
+# the Status: line afterwards to distinguish "refreshed" from "up to date".
+# On failure, the full error is already on stderr so the operator sees it.
 sw_bootstrap_pull_image() {
   local image="${1:-$STACKWIZ_IMAGE}"
-  local pull_out
-  if pull_out=$(sudo docker pull "$image" 2>&1); then
-    local status
-    status=$(echo "$pull_out" | grep -E '^Status:' | tail -n1)
-    local digest created
+  local pull_log rc
+  pull_log="$(mktemp)"
+  # stdbuf -oL keeps docker's progress lines line-buffered so the tee shows
+  # them live instead of batching until close; falls back to plain pipe if
+  # stdbuf isn't installed (coreutils is standard, but just in case).
+  if command -v stdbuf >/dev/null 2>&1; then
+    set -o pipefail
+    stdbuf -oL sudo docker pull "$image" 2>&1 | tee "$pull_log"
+    rc=${PIPESTATUS[0]}
+    set +o pipefail
+  else
+    set -o pipefail
+    sudo docker pull "$image" 2>&1 | tee "$pull_log"
+    rc=${PIPESTATUS[0]}
+    set +o pipefail
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    local status digest created
+    status=$(grep -E '^Status:' "$pull_log" | tail -n1)
     digest=$(sudo docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$image" 2>/dev/null || true)
     created=$(sudo docker image inspect --format '{{.Created}}' "$image" 2>/dev/null || true)
     if echo "$status" | grep -q 'Downloaded newer image'; then
@@ -174,21 +189,23 @@ sw_bootstrap_pull_image() {
     else
       sw_log "image up to date (${digest:-$image}, built ${created})"
     fi
+    rm -f "$pull_log"
     return 0
   fi
+
+  rm -f "$pull_log"
   if sudo docker image inspect "$image" >/dev/null 2>&1; then
     local digest created
     digest=$(sudo docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$image" 2>/dev/null || true)
     created=$(sudo docker image inspect --format '{{.Created}}' "$image" 2>/dev/null || true)
-    sw_warn "docker pull failed: ${pull_out}"
+    sw_warn "docker pull failed (see output above); using cached image"
     if [ -n "$digest" ]; then
-      sw_warn "using cached image: ${digest} (built ${created})"
+      sw_warn "cached image: ${digest} (built ${created})"
     else
-      sw_warn "using cached image: ${image} (built ${created}; no RepoDigests — likely a local build)"
+      sw_warn "cached image: ${image} (built ${created}; no RepoDigests — likely a local build)"
     fi
   else
-    sw_err "docker pull failed: ${pull_out}"
-    sw_err "image $image not found locally either"
+    sw_err "docker pull failed (see output above); image $image not found locally either"
     exit 1
   fi
 }
