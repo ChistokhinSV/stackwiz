@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import hvac
 import pytest
 
-from stackwiz.vault_client import VaultClient
+from stackwiz.vault_client import VaultClient, resolve_verify
 
 
 @pytest.fixture
@@ -82,3 +82,46 @@ def test_revoke_token_noop_on_empty(client: VaultClient) -> None:
 def test_revoke_install_policy_deletes_by_derived_name(client: VaultClient) -> None:
     client.revoke_install_policy("081", "grafana")
     client._client.sys.delete_policy.assert_called_once_with(name="081-grafana-install")
+
+
+# --- resolve_verify ---------------------------------------------------------
+
+
+def test_resolve_verify_defaults_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VAULT_CACERT", raising=False)
+    monkeypatch.delenv("STACKWIZ_VAULT_VERIFY", raising=False)
+    assert resolve_verify() is True
+
+
+def test_resolve_verify_explicit_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VAULT_CACERT", "/etc/ssl/ca.pem")
+    monkeypatch.setenv("STACKWIZ_VAULT_VERIFY", "false")
+    assert resolve_verify(True) is True
+    assert resolve_verify(False) is False
+
+
+def test_resolve_verify_cacert_wins_over_opt_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VAULT_CACERT", "/etc/ssl/ca.pem")
+    monkeypatch.setenv("STACKWIZ_VAULT_VERIFY", "false")
+    assert resolve_verify() == "/etc/ssl/ca.pem"
+
+
+@pytest.mark.parametrize("val", ["false", "0", "no", "False", "NO"])
+def test_resolve_verify_opt_out_values(
+    monkeypatch: pytest.MonkeyPatch, val: str
+) -> None:
+    monkeypatch.delenv("VAULT_CACERT", raising=False)
+    monkeypatch.setenv("STACKWIZ_VAULT_VERIFY", val)
+    # Reset the once-per-process warning gate so each parametrized run re-tests.
+    if hasattr(resolve_verify, "_warned"):
+        delattr(resolve_verify, "_warned")
+    assert resolve_verify() is False
+
+
+def test_vault_client_ctor_honors_cacert_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VAULT_CACERT", "/etc/ssl/myca.pem")
+    with patch("stackwiz.vault_client.hvac.Client") as hvac_cls:
+        hvac_cls.return_value = MagicMock()
+        VaultClient("https://vault.example", token="t")
+        kwargs = hvac_cls.call_args.kwargs
+        assert kwargs["verify"] == "/etc/ssl/myca.pem"

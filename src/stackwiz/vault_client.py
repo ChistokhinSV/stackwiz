@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import warnings
 from dataclasses import dataclass
@@ -10,12 +11,49 @@ from pathlib import Path
 import hvac
 import urllib3
 
-# Vault uses self-signed certs on localhost; suppress noisy TLS warnings.
-warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+log = logging.getLogger("stackwiz.vault")
 
 KV_MOUNT = "stackwiz"
 UNSEAL_SHARES = 5
 UNSEAL_THRESHOLD = 3
+
+
+def resolve_verify(explicit: bool | str | None = None) -> bool | str:
+    """Resolve the TLS-verify setting for requests to Vault.
+
+    Precedence (first match wins):
+      1. `explicit` arg (tests / callers that already know)
+      2. `VAULT_CACERT` env — path to a CA bundle (returned as the path)
+      3. `STACKWIZ_VAULT_VERIFY=false|0|no` — explicit opt-out (returns False)
+      4. Default: True (system CA trust)
+
+    A False result is logged at WARNING the first time we return one per
+    process, so a misconfiguration doesn't slip through silently.
+    """
+    if explicit is not None:
+        return explicit
+    cacert = os.environ.get("VAULT_CACERT", "").strip()
+    if cacert:
+        return cacert
+    raw = os.environ.get("STACKWIZ_VAULT_VERIFY", "").strip().lower()
+    if raw in {"false", "0", "no"}:
+        if not getattr(resolve_verify, "_warned", False):
+            log.warning(
+                "TLS verification against Vault is DISABLED "
+                "(STACKWIZ_VAULT_VERIFY=%s). Set VAULT_CACERT to a trust "
+                "bundle to re-enable.", raw,
+            )
+            resolve_verify._warned = True  # type: ignore[attr-defined]
+        return False
+    return True
+
+
+# When verification is off we still want the urllib3 warning suppressed so
+# operator logs aren't swamped. Called by callers that set verify=False.
+def suppress_insecure_warnings() -> None:
+    warnings.filterwarnings(
+        "ignore", category=urllib3.exceptions.InsecureRequestWarning
+    )
 
 
 @dataclass
@@ -31,16 +69,17 @@ class VaultClient:
         self,
         address: str,
         token: str | None = None,
+        verify: bool | str | None = None,
     ) -> None:
         self.address = address.rstrip("/")
         self._token = token or os.environ.get("VAULT_TOKEN", "") or None
-        # verify=False: stackwiz is always managing its own Vault (self-bootstrap
-        # or locally adopted), and 081-style TLS deploys use self-signed or
-        # locally-issued certs. Host-level trust is the boundary, not hvac.
+        self._verify = resolve_verify(verify)
+        if self._verify is False:
+            suppress_insecure_warnings()
         self._client = hvac.Client(
             url=self.address,
             token=self._token,
-            verify=False,
+            verify=self._verify,
         )
 
     # --- health / auth ----------------------------------------------------------

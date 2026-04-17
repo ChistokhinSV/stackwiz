@@ -15,6 +15,18 @@
 
 STATE_DIR="${STACKWIZ_STATE_DIR:-/var/lib/stackwiz}"
 
+# TLS options for curl against Vault. See stackwiz.vault_client.resolve_verify
+# for precedence: VAULT_CACERT wins; STACKWIZ_VAULT_VERIFY=false opts out.
+_kb_publish_curl_tls() {
+    if [ -n "${VAULT_CACERT:-}" ]; then
+        printf -- '--cacert %s' "${VAULT_CACERT}"
+    elif [ "${STACKWIZ_VAULT_VERIFY:-true}" = "false" ] \
+      || [ "${STACKWIZ_VAULT_VERIFY:-true}" = "0" ] \
+      || [ "${STACKWIZ_VAULT_VERIFY:-true}" = "no" ]; then
+        printf -- '-k'
+    fi
+}
+
 _kb_publish_vault_token() {
     if [ -n "${VAULT_TOKEN:-}" ]; then echo "$VAULT_TOKEN"; return 0; fi
     local state="${STATE_DIR}"
@@ -85,7 +97,8 @@ stackwiz_kb_authorize_sync_key() {
 
     # Read the central sync public key from Vault shared path.
     local pubkey
-    pubkey=$(curl -sfk -H "X-Vault-Token: ${token}" \
+    # shellcheck disable=SC2046  # intentional word-split of TLS opts
+    pubkey=$(curl -sf $(_kb_publish_curl_tls) -H "X-Vault-Token: ${token}" \
         "${VAULT_ADDR}/v1/stackwiz/data/shared/kb_sync_ssh_pubkey" 2>/dev/null \
         | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"]["data"]["value"])' 2>/dev/null || true)
 

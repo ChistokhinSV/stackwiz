@@ -9,17 +9,18 @@ An explicit env override (CONSUL_HTTP_ADDR / VAULT_ADDR) always wins.
 """
 from __future__ import annotations
 
+import logging
 import os
-import warnings
 from dataclasses import dataclass
 from enum import StrEnum
 
 import dns.exception
 import dns.resolver
 import httpx
-import urllib3
 
-warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+from stackwiz.vault_client import resolve_verify, suppress_insecure_warnings
+
+log = logging.getLogger("stackwiz.discovery")
 
 CONSUL_DEFAULT_PORT = 8500
 VAULT_DEFAULT_PORT = 8200
@@ -53,7 +54,11 @@ def _dns_resolves(host: str) -> bool:
         return False
 
 
-async def _http_ok(url: str, timeout: float = 2.5, verify: bool = True) -> bool:
+async def _http_ok(
+    url: str, timeout: float = 2.5, verify: bool | str = True
+) -> bool:
+    if verify is False:
+        suppress_insecure_warnings()
     try:
         async with httpx.AsyncClient(timeout=timeout, verify=verify) as client:
             response = await client.get(url)
@@ -108,24 +113,37 @@ async def probe_vault(
 ) -> ProbeResult:
     """Find a reachable Vault. Probe order mirrors `probe_consul`.
 
-    For each candidate address we try HTTPS first (verify disabled for
-    self-signed certs) then plain HTTP, because a TLS-enabled Vault will
-    refuse plaintext requests entirely (see 081's raft + TLS listener),
-    while a non-TLS Vault (80-style) still responds to plain HTTP.
+    TLS verification honors STACKWIZ_VAULT_VERIFY / VAULT_CACERT (see
+    stackwiz.vault_client.resolve_verify). A token in env with an HTTP
+    (plaintext) fallback is a misconfiguration; the caller is warn-logged.
     """
     health = "/v1/sys/health?standbyok=true&sealedok=true"
+    verify = resolve_verify()
+    has_token = bool(os.environ.get("VAULT_TOKEN", "").strip())
 
     async def _try(host: str) -> str | None:
-        for scheme in ("https", "http"):
-            url = f"{scheme}://{host}:{VAULT_DEFAULT_PORT}"
-            if await _http_ok(f"{url}{health}", verify=False):
-                return url
+        # HTTPS first (verify-aware) — TLS-enabled Vault refuses plain HTTP.
+        url = f"https://{host}:{VAULT_DEFAULT_PORT}"
+        if await _http_ok(f"{url}{health}", verify=verify):
+            return url
+        # HTTP fallback only when no token is in scope; otherwise skip so we
+        # don't leak the token over plaintext.
+        if has_token:
+            log.warning(
+                "probe_vault: HTTPS to %s failed and VAULT_TOKEN is set — "
+                "refusing HTTP fallback to avoid leaking the token over "
+                "plaintext.", host,
+            )
+            return None
+        url = f"http://{host}:{VAULT_DEFAULT_PORT}"
+        if await _http_ok(f"{url}{health}", verify=False):
+            return url
         return None
 
     env_addr = os.environ.get("VAULT_ADDR", "").strip()
     if env_addr:
         addr = _normalize_addr(env_addr, VAULT_DEFAULT_PORT)
-        if await _http_ok(f"{addr}{health}", verify=False):
+        if await _http_ok(f"{addr}{health}", verify=verify):
             return ProbeResult(Source.ENV, addr, "VAULT_ADDR")
 
     host = host_override or f"vault.{domain}"

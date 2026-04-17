@@ -13,6 +13,20 @@
 
 STACKWIZ_SNMP_USER="stackwiz"
 
+# TLS-verify options for curl against Vault:
+#   VAULT_CACERT=/path    → curl --cacert /path
+#   STACKWIZ_VAULT_VERIFY=false → curl -k (opt-out, warn)
+#   otherwise            → default (system CA trust)
+_stackwiz_snmp_curl_tls() {
+    if [ -n "${VAULT_CACERT:-}" ]; then
+        printf -- '--cacert %s' "${VAULT_CACERT}"
+    elif [ "${STACKWIZ_VAULT_VERIFY:-true}" = "false" ] \
+      || [ "${STACKWIZ_VAULT_VERIFY:-true}" = "0" ] \
+      || [ "${STACKWIZ_VAULT_VERIFY:-true}" = "no" ]; then
+        printf -- '-k'
+    fi
+}
+
 _stackwiz_snmp_vault_addr() {
     local addr="${VAULT_ADDR:-}"
     if [ -z "$addr" ]; then
@@ -53,7 +67,8 @@ _stackwiz_snmp_vault_get() {
     token="$(_stackwiz_snmp_vault_token)"
     [ -z "$token" ] && return 1
     host_path="$(_stackwiz_snmp_host_path)"
-    curl -sfk -H "X-Vault-Token: ${token}" \
+    # shellcheck disable=SC2046  # intentional word-split of TLS opts
+    curl -sf $(_stackwiz_snmp_curl_tls) -H "X-Vault-Token: ${token}" \
         "${addr}/v1/stackwiz/data/${host_path}" 2>/dev/null \
         | python3 -c 'import sys,json
 d=json.load(sys.stdin).get("data",{}).get("data",{})
@@ -83,7 +98,8 @@ _stackwiz_snmp_vault_put() {
     local snmp_data="{\"snmp_user\":\"${user}\",\"snmp_auth_protocol\":\"SHA\",\"snmp_auth_key\":\"${auth_key}\",\"snmp_priv_protocol\":\"AES\",\"snmp_priv_key\":\"${priv_key}\"}"
 
     local existing
-    existing="$(curl -sfk -H "X-Vault-Token: ${token}" \
+    # shellcheck disable=SC2046
+    existing="$(curl -sf $(_stackwiz_snmp_curl_tls) -H "X-Vault-Token: ${token}" \
         "${addr}/v1/stackwiz/data/${host_path}" 2>/dev/null \
         | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin).get("data",{}).get("data",{})))' 2>/dev/null || echo '{}')"
 
@@ -98,7 +114,8 @@ existing.update(snmp)
 print(json.dumps(existing))
 " 2>/dev/null || echo "$snmp_data")"
 
-    curl -sfk -X PUT -H "X-Vault-Token: ${token}" \
+    # shellcheck disable=SC2046
+    curl -sf $(_stackwiz_snmp_curl_tls) -X PUT -H "X-Vault-Token: ${token}" \
         -H "Content-Type: application/json" \
         "${addr}/v1/stackwiz/data/${host_path}" \
         -d "{\"data\":${merged}}" \

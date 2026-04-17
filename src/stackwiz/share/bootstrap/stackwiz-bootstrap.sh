@@ -58,6 +58,21 @@ sw_log() { echo "[bootstrap] $*"; }
 sw_warn() { echo "warn: $*" >&2; }
 sw_err() { echo "error: $*" >&2; }
 
+# Emit curl TLS options for Vault. See stackwiz.vault_client.resolve_verify
+# for precedence:
+#   VAULT_CACERT=/path         → --cacert /path
+#   STACKWIZ_VAULT_VERIFY=false → -k  (explicit opt-out; logged as warning)
+#   otherwise                  → default (system CA trust, verify on)
+sw_vault_curl_tls() {
+  if [ -n "${VAULT_CACERT:-}" ]; then
+    printf -- '--cacert %s' "${VAULT_CACERT}"
+  elif [ "${STACKWIZ_VAULT_VERIFY:-true}" = "false" ] \
+    || [ "${STACKWIZ_VAULT_VERIFY:-true}" = "0" ] \
+    || [ "${STACKWIZ_VAULT_VERIFY:-true}" = "no" ]; then
+    printf -- '-k'
+  fi
+}
+
 # Vault preflight for per-component installers.
 #
 # Use from install/*.sh like:
@@ -84,7 +99,8 @@ sw_require_vault() {
     exit 1
   fi
   local code
-  code=$(curl -sk -o /dev/null -w '%{http_code}' \
+  # shellcheck disable=SC2046  # intentional word-split of TLS opts
+  code=$(curl -s $(sw_vault_curl_tls) -o /dev/null -w '%{http_code}' \
     -H "X-Vault-Token: ${VAULT_TOKEN}" \
     "${VAULT_ADDR%/}/v1/auth/token/lookup-self" 2>/dev/null || echo 000)
   case "$code" in
