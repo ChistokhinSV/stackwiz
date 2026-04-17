@@ -15,6 +15,9 @@ from stackwiz.manifest import Component, Manifest
 
 STATE_FILENAME = "installed.yaml"
 CONFIG_FILENAME = "config.yaml"
+# Bump when the on-disk state shape changes in a non-additive way. Old
+# stackwiz readers refuse state files with a higher schema number on load.
+STATE_SCHEMA_VERSION = 1
 
 
 class Action(StrEnum):
@@ -91,6 +94,20 @@ class State:
     def _load(self) -> None:
         if self.installed_path.exists():
             raw = yaml.safe_load(self.installed_path.read_text(encoding="utf-8")) or {}
+            # Validate the state schema matches what this version of stackwiz
+            # knows how to read. An older installer could otherwise silently
+            # accept a newer-schema state file and corrupt data on save.
+            schema = raw.get("schema", 1)
+            if not isinstance(schema, int) or schema < 1:
+                raise ValueError(
+                    f"state {self.installed_path}: invalid schema {schema!r}"
+                )
+            if schema > STATE_SCHEMA_VERSION:
+                raise ValueError(
+                    f"state {self.installed_path}: schema={schema} is newer "
+                    f"than this stackwiz version supports "
+                    f"(max={STATE_SCHEMA_VERSION}). Upgrade stackwiz."
+                )
             for cid, entry in raw.get("components", {}).items():
                 self._installed[cid] = InstalledComponent.from_dict({"id": cid, **entry})
         if self.config_path.exists():
@@ -126,7 +143,7 @@ class State:
 
     def _save_installed(self) -> None:
         payload = {
-            "schema": 1,
+            "schema": STATE_SCHEMA_VERSION,
             "components": {
                 cid: {k: v for k, v in entry.to_dict().items() if k != "id"}
                 for cid, entry in sorted(self._installed.items())

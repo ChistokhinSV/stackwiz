@@ -3,8 +3,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+import yaml
+
 from stackwiz.manifest import load_manifest
-from stackwiz.state import Action, State, component_config_hash
+from stackwiz.state import (
+    STATE_FILENAME,
+    STATE_SCHEMA_VERSION,
+    Action,
+    State,
+    component_config_hash,
+)
 
 FIXTURE = Path(__file__).parent / "manifest_valid.yaml"
 
@@ -77,3 +86,34 @@ def test_hash_is_stable_across_dict_order() -> None:
     h1 = component_config_hash(c, {"a": 1, "b": 2})
     h2 = component_config_hash(c, {"b": 2, "a": 1})
     assert h1 == h2
+
+
+def test_future_state_schema_rejected(tmp_path: Path) -> None:
+    """An older stackwiz reading a newer state file must refuse to load
+    instead of silently corrupting it on save."""
+    payload = {"schema": STATE_SCHEMA_VERSION + 5, "components": {}}
+    (tmp_path / STATE_FILENAME).write_text(
+        yaml.safe_dump(payload), encoding="utf-8",
+    )
+    with pytest.raises(Exception, match="schema"):
+        State(tmp_path)
+
+
+def test_invalid_state_schema_rejected(tmp_path: Path) -> None:
+    payload = {"schema": "not-a-number", "components": {}}
+    (tmp_path / STATE_FILENAME).write_text(
+        yaml.safe_dump(payload), encoding="utf-8",
+    )
+    with pytest.raises(Exception, match="invalid schema"):
+        State(tmp_path)
+
+
+def test_missing_state_schema_defaults_to_1(tmp_path: Path) -> None:
+    """Pre-schema state files must still load (they were all schema 1
+    implicitly; the field was always written but readers ignored it)."""
+    payload = {"components": {}}
+    (tmp_path / STATE_FILENAME).write_text(
+        yaml.safe_dump(payload), encoding="utf-8",
+    )
+    state = State(tmp_path)
+    assert state.installed() == {}

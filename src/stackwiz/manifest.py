@@ -1,16 +1,51 @@
 """Pydantic v2 models for components.yaml and loader."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+log = logging.getLogger("stackwiz.manifest")
 
-class ConsulServiceCheck(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+# Bump this when the manifest shape changes in a non-additive way. Additive
+# fields don't need a bump — `_LeafModel` already warns on unknown keys for
+# consumer forward-compat. The version is enforced by `load_manifest`.
+CURRENT_SCHEMA_VERSION = 1
 
+
+class _LeafModel(BaseModel):
+    """Base class for user-authored manifest leaves.
+
+    Unknown keys are logged at WARNING and dropped — NOT a hard error.
+    A framework upgrade that adds a new field to Component / Secret /
+    ConfigField must not break older consumer manifests that don't know
+    about it yet. ``extra="forbid"`` is reserved for the root ``Manifest``
+    model where typos should fail loud.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _warn_on_extras(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+        known = set(cls.model_fields.keys())
+        extras = sorted(k for k in values if k not in known)
+        if extras:
+            log.warning(
+                "manifest: ignoring unknown key%s on %s: %s",
+                "" if len(extras) == 1 else "s",
+                cls.__name__,
+                ", ".join(extras),
+            )
+        return values
+
+
+class ConsulServiceCheck(_LeafModel):
     http: str | None = None
     tcp: str | None = None
     interval: str = "30s"
@@ -23,9 +58,7 @@ class ConsulServiceCheck(BaseModel):
         return self
 
 
-class ConsulService(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ConsulService(_LeafModel):
     name: str
     port: int
     tags: list[str] = Field(default_factory=list)
@@ -33,9 +66,7 @@ class ConsulService(BaseModel):
     check: ConsulServiceCheck | None = None
 
 
-class ConsulDiscover(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ConsulDiscover(_LeafModel):
     service: str
     env_var: str
     # When true (default), missing the service at install time aborts the step
@@ -44,16 +75,12 @@ class ConsulDiscover(BaseModel):
     required: bool = True
 
 
-class ConsulConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ConsulConfig(_LeafModel):
     required: bool = True
     service_prefix: str
 
 
-class Component(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class Component(_LeafModel):
     id: str
     name: str
     version: str = "0.0.0"
@@ -103,9 +130,7 @@ class Component(BaseModel):
         return []
 
 
-class ConfigField(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ConfigField(_LeafModel):
     id: str
     label: str
     type: Literal["text", "select", "bool", "int", "password"]
@@ -135,9 +160,7 @@ class ConfigField(BaseModel):
         return isinstance(self.default, str) and "${" in self.default
 
 
-class Secret(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class Secret(_LeafModel):
     id: str
     generate: bool = True
     # `length` semantics depend on `type`:
@@ -177,8 +200,11 @@ class Secret(BaseModel):
 
 
 class Manifest(BaseModel):
+    # Root: typos here should fail loud. Leaves use _LeafModel which tolerates
+    # unknown keys so consumers survive framework field additions.
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: int = CURRENT_SCHEMA_VERSION
     name: str
     display_name: str
     version: str
@@ -241,4 +267,15 @@ def load_manifest(path: Path | str) -> Manifest:
         data = yaml.safe_load(f)
     if not isinstance(data, dict):
         raise ValueError(f"manifest root must be a mapping: {p}")
+    version = data.get("schema_version", CURRENT_SCHEMA_VERSION)
+    if not isinstance(version, int) or version < 1:
+        raise ValueError(
+            f"manifest {p}: schema_version must be a positive integer, got {version!r}"
+        )
+    if version > CURRENT_SCHEMA_VERSION:
+        raise ValueError(
+            f"manifest {p}: schema_version={version} is newer than this "
+            f"framework supports (max={CURRENT_SCHEMA_VERSION}). "
+            f"Upgrade stackwiz."
+        )
     return Manifest.model_validate(data)
