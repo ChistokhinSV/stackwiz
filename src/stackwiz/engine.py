@@ -556,6 +556,7 @@ class Engine:
             from stackwiz.info import write_summary_md
             write_summary_md(
                 self.manifest, self.state, self.consul, self.vault,
+                manifest_dir=self.executor.manifest_dir,
             )
             log.info("summary written to %s", self.state.host_path("summary.md"))
         except Exception as exc:  # noqa: BLE001
@@ -564,10 +565,17 @@ class Engine:
     def _kv_payload(
         self, config_values: dict[str, Any], component: Component
     ) -> dict[str, Any]:
-        # v1: mirror all config values into consul KV. Per-component filtering
-        # can be added later if the manifest schema grows a `publishes:` field.
-        del component
-        return dict(config_values)
+        """Config subset that THIS component publishes to Consul KV.
+
+        A component's ``publishes:`` list enumerates which keys other
+        components / external consumers need to discover at runtime. Empty
+        (the default) means the component publishes nothing — state.yaml
+        remains the single source of truth for local config, and Consul KV
+        only carries cross-component contract data.
+        """
+        if not component.publishes:
+            return {}
+        return {k: config_values[k] for k in component.publishes if k in config_values}
 
     def _upload_user_secrets(self) -> None:
         """Push filled `.stackwiz.secrets.env` entries to Vault, strip on success.

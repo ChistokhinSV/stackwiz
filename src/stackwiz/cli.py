@@ -456,6 +456,7 @@ def info(
     manifest = _load(manifest_path)
     state_dir = _resolve_state_dir(state_dir, manifest)
     state_dir.mkdir(parents=True, exist_ok=True)
+    manifest_dir = manifest_path.parent.resolve()
     from stackwiz.info import render_info
 
     rc = render_info(
@@ -463,6 +464,7 @@ def info(
         state_dir=state_dir,
         show_secrets=show_secrets,
         output_format=output_format,
+        manifest_dir=manifest_dir,
     )
     sys.exit(rc)
 

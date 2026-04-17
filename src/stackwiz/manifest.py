@@ -100,6 +100,13 @@ class Component(_LeafModel):
     consul_services: list[ConsulService] = Field(default_factory=list)
     consul_discover: list[ConsulDiscover] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    # Config keys this component publishes to Consul KV under
+    # ``{service_prefix}/config/<key>``. Empty list (the default) means
+    # NOTHING is published — previously the engine mirrored every config
+    # value for every component, producing two sources of truth with
+    # ``state/config.yaml``. Declare only the keys other components /
+    # external consumers need to discover at runtime.
+    publishes: list[str] = Field(default_factory=list)
 
     @field_validator("id")
     @classmethod

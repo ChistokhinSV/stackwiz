@@ -64,6 +64,7 @@ def collect(
     consul: ConsulClient | None,
     vault: VaultClient | None,
     show_secrets: bool,
+    manifest_dir: Path | None = None,
 ) -> ReportData:
     """Gather everything into a ReportData (pure, easy to unit-test)."""
     by_id = {c.id: c for c in manifest.components}
@@ -119,7 +120,21 @@ def collect(
             immutable=spec.immutable,
         ))
 
+    # Prefer the fully-resolved cascade (state > .stackwiz.env > manifest
+    # defaults, with ${...} substitution) so an operator edit to
+    # .stackwiz.env is visible in `wizinstall info` even before the next
+    # re-run. Falls back to raw state on any loader failure.
+    effective_config_values = state.config()
     effective_domain = state.config().get("domain", manifest.domain) or manifest.domain
+    if manifest_dir is not None:
+        try:
+            from stackwiz.config_overrides import effective_config
+            env_file = manifest_dir / ".stackwiz.env"
+            resolved, domain = effective_config(manifest, state.config(), env_file)
+            effective_config_values = resolved
+            effective_domain = domain
+        except Exception:  # noqa: BLE001
+            pass  # keep the raw state.config fallback
 
     return ReportData(
         manifest_name=manifest.display_name,
@@ -127,7 +142,7 @@ def collect(
         domain=effective_domain,
         components=components,
         secrets=secrets,
-        config=state.config(),
+        config=effective_config_values,
         state_dir=state.state_dir,
         host_state_dir=state.host_path(),
     )
@@ -283,9 +298,13 @@ def write_summary_md(
     state: State,
     consul: ConsulClient | None,
     vault: VaultClient | None,
+    manifest_dir: Path | None = None,
 ) -> Path:
     """Atomic write of `<state_dir>/summary.md` for engine post-install."""
-    report = collect(manifest, state, consul, vault, show_secrets=False)
+    report = collect(
+        manifest, state, consul, vault,
+        show_secrets=False, manifest_dir=manifest_dir,
+    )
     body = render_markdown(report, show_secrets=False)
     target = state.state_dir / "summary.md"
     tmp = target.with_suffix(".md.tmp")
@@ -302,14 +321,30 @@ def render_info(
     state_dir: Path,
     show_secrets: bool,
     output_format: str,
+    manifest_dir: Path | None = None,
 ) -> int:
     """Called by `wizinstall info`. Builds clients from discovery probes."""
     import asyncio
 
+    from stackwiz.config_overrides import effective_config
     from stackwiz.tokens import build_backends
 
     state = State(state_dir)
-    effective_domain = state.config().get("domain", manifest.domain) or manifest.domain
+    # Use the full cascade for domain resolution so an operator edit to
+    # .stackwiz.env drives discovery even before the next `wizinstall run`.
+    if manifest_dir is not None:
+        try:
+            _, effective_domain = effective_config(
+                manifest, state.config(), manifest_dir / ".stackwiz.env",
+            )
+        except Exception:  # noqa: BLE001
+            effective_domain = (
+                state.config().get("domain", manifest.domain) or manifest.domain
+            )
+    else:
+        effective_domain = (
+            state.config().get("domain", manifest.domain) or manifest.domain
+        )
 
     async def _probe_both() -> tuple:
         return (
@@ -322,7 +357,10 @@ def render_info(
         state_dir, consul_probe, vault_probe,
     )
 
-    report = collect(manifest, state, consul_client, vault_client, show_secrets)
+    report = collect(
+        manifest, state, consul_client, vault_client, show_secrets,
+        manifest_dir=manifest_dir,
+    )
 
     if output_format == "markdown":
         click.echo(render_markdown(report, show_secrets=show_secrets), nl=False)
@@ -332,5 +370,8 @@ def render_info(
         click.echo(render_text(report, show_secrets=show_secrets), nl=False)
 
     # Refresh summary.md whenever `info` is run (keeps it current on re-runs).
-    write_summary_md(manifest, state, consul_client, vault_client)
+    write_summary_md(
+        manifest, state, consul_client, vault_client,
+        manifest_dir=manifest_dir,
+    )
     return 0

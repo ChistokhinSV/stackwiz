@@ -163,3 +163,28 @@ def test_catchup_policies_swallows_errors(
     monkeypatch.setattr(engine.state, "installed", lambda: installed)
     # Must not raise.
     engine._catchup_service_policies()
+
+
+# --- _kv_payload (publishes: filter) ----------------------------------------
+
+
+def test_kv_payload_empty_by_default(engine: Engine) -> None:
+    """Components without `publishes:` publish nothing (not everything)."""
+    component = engine.manifest.topo_order()[0]  # k3s — no publishes in fixture
+    assert engine._kv_payload({"a": 1, "b": 2, "domain": "x"}, component) == {}
+
+
+def test_kv_payload_filters_to_publishes(engine: Engine) -> None:
+    component = engine.manifest.topo_order()[0]
+    # Manifest fixture doesn't declare publishes, so inject it on the model.
+    published = component.model_copy(update={"publishes": ["a", "domain"]})
+    config = {"a": 1, "b": 2, "domain": "example.com"}
+    assert engine._kv_payload(config, published) == {
+        "a": 1, "domain": "example.com",
+    }
+
+
+def test_kv_payload_missing_key_silently_skipped(engine: Engine) -> None:
+    component = engine.manifest.topo_order()[0]
+    published = component.model_copy(update={"publishes": ["a", "missing"]})
+    assert engine._kv_payload({"a": 1}, published) == {"a": 1}

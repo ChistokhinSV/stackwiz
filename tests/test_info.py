@@ -121,6 +121,39 @@ def test_write_summary_md_atomic(tmp_path: Path) -> None:
     write_summary_md(manifest, state, consul, vault)
 
 
+def test_collect_picks_up_stackwiz_env_override_when_manifest_dir_set(
+    tmp_path: Path,
+) -> None:
+    """info.collect with manifest_dir runs the full effective_config cascade,
+    so an operator edit to .stackwiz.env is visible without re-running install."""
+    manifest, state, consul, vault = _prime(tmp_path)
+    # State cache says app_domain=a.example.internal. Now the operator edits
+    # .stackwiz.env to set a different domain — wizinstall info should
+    # surface the new value even though state wasn't re-written.
+    (tmp_path / ".stackwiz.env").write_text(
+        'domain: "operator-edited.lan"\n', encoding="utf-8",
+    )
+    report = collect(
+        manifest, state, consul, vault,
+        show_secrets=False, manifest_dir=tmp_path,
+    )
+    assert report.domain == "operator-edited.lan", (
+        "domain must follow .stackwiz.env when manifest_dir is threaded through"
+    )
+
+
+def test_collect_falls_back_to_state_without_manifest_dir(tmp_path: Path) -> None:
+    """Legacy call without manifest_dir preserves state-cache behaviour."""
+    manifest, state, consul, vault = _prime(tmp_path)
+    (tmp_path / ".stackwiz.env").write_text(
+        'domain: "should-be-ignored.lan"\n', encoding="utf-8",
+    )
+    report = collect(manifest, state, consul, vault, show_secrets=False)
+    # .stackwiz.env is NOT read without manifest_dir; falls back to state
+    # cache (or manifest default).
+    assert report.domain != "should-be-ignored.lan"
+
+
 def test_host_path_reflected_in_rendered_output(
     tmp_path: Path, monkeypatch
 ) -> None:
