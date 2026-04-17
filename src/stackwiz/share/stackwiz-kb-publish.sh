@@ -38,6 +38,15 @@ _kb_publish_vault_token() {
 
 stackwiz_kb_publish() {
     local kb_dir="$1" repo_name="$2"
+    # repo_name flows into a filesystem path; restrict to a safe filename
+    # charset to stop a malicious / typo'd manifest from writing outside
+    # /opt/stackwiz/kb-publish/.
+    case "$repo_name" in
+        *[!A-Za-z0-9._-]*|""|"."|"..")
+            echo "stackwiz-kb-publish: invalid repo_name '$repo_name' — expected [A-Za-z0-9._-]+" >&2
+            return 1
+            ;;
+    esac
     local bare="/opt/stackwiz/kb-publish/${repo_name}.git"
 
     if [ ! -d "$kb_dir" ]; then

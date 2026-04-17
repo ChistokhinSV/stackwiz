@@ -23,6 +23,34 @@ STACKWIZ_NGINX_COMPOSE="${STACKWIZ_NGINX_DIR}/compose.yml"
 STACKWIZ_NGINX_CONSUMERS="${STACKWIZ_NGINX_DIR}/.consumers"
 STACKWIZ_NGINX_LOCK="${STACKWIZ_NGINX_DIR}/.lock"
 
+# ---- Input validation ------------------------------------------------------
+# Caller-supplied labels (namespace, component name, hostname) flow into
+# filesystem paths under ${STACKWIZ_NGINX_DIR}. Reject anything outside a
+# conservative charset so a compromised/typo'd manifest can't write outside
+# the intended dirs (../../etc/passwd.conf, absolute paths, newlines).
+
+_stackwiz_nginx_check_label() {
+    # Usage: _stackwiz_nginx_check_label <kind> <value>
+    local kind="$1" value="$2"
+    case "$value" in
+        *[!A-Za-z0-9._-]*|""|"."|"..")
+            echo "stackwiz-nginx: invalid ${kind} '${value}' — expected [A-Za-z0-9._-]+" >&2
+            return 1
+            ;;
+    esac
+}
+
+_stackwiz_nginx_check_hostname() {
+    # Hostnames: dotted labels, each [A-Za-z0-9-]+. No leading dot, no ../.
+    local host="$1"
+    case "$host" in
+        *[!A-Za-z0-9.-]*|""|.*|*..*)
+            echo "stackwiz-nginx: invalid hostname '${host}'" >&2
+            return 1
+            ;;
+    esac
+}
+
 # ---- Locking (flock) -------------------------------------------------------
 
 _stackwiz_nginx_lock() {
@@ -190,6 +218,9 @@ stackwiz_nginx_add_conf() {
     local pri="${2:?priority required}"
     local name="${3:?name required}"
     local file="${4:-}"
+    _stackwiz_nginx_check_label namespace "$ns" || return 1
+    _stackwiz_nginx_check_label priority  "$pri" || return 1
+    _stackwiz_nginx_check_label name      "$name" || return 1
     local target="${STACKWIZ_NGINX_DIR}/conf.d/${ns}--${pri}-${name}.conf"
 
     if [ -n "${file}" ] && [ -f "${file}" ]; then
@@ -209,6 +240,7 @@ stackwiz_nginx_add_cert() {
     local host="${1:?hostname required}"
     local cert="${2:?cert_path required}"
     local key="${3:?key_path required}"
+    _stackwiz_nginx_check_hostname "$host" || return 1
     install -m 0644 "${cert}" "${STACKWIZ_NGINX_DIR}/tls/${host}.crt"
     install -m 0600 "${key}"  "${STACKWIZ_NGINX_DIR}/tls/${host}.key"
     # nginx-unprivileged (image) runs as uid 101; the read-only bind mount
@@ -331,6 +363,7 @@ stackwiz_nginx_reload() {
 stackwiz_nginx_remove_consumer() {
     # Remove all configs for a namespace. If last consumer, tear down container.
     local ns="${1:?namespace required}"
+    _stackwiz_nginx_check_label namespace "$ns" || return 1
 
     # Remove this consumer's config files.
     rm -f "${STACKWIZ_NGINX_DIR}/conf.d/${ns}--"*.conf
