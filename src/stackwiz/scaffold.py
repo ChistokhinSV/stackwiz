@@ -53,7 +53,13 @@ class BootstrapWriteResult:
 
 
 BOOTSTRAP_STUB_TEMPLATE = """#!/usr/bin/env bash
-# stackwiz consumer bootstrap stub. Edit SW_* arrays to match your project.
+# stackwiz consumer bootstrap stub.
+#
+# EDIT THIS FILE — per-project customization lives here. Tune the SW_*
+# arrays below. The paired stackwiz-bootstrap.sh library is
+# framework-managed; do not edit it. Refresh both via:
+#     docker run --rm -v "$PWD:/out" ghcr.io/chistokhinsv/stackwiz:latest \\
+#         extract-bootstrap --output /out --force
 set -euo pipefail
 
 # Host packages to ensure before running. Drop jq/openssl/envsubst if unused.

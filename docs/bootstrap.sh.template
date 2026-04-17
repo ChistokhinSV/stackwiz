@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
 # stackwiz consumer bootstrap stub.
 #
-# This is the canonical shape: a thin wrapper that declares the consumer's
-# SW_* knobs and delegates to the vendored stackwiz-bootstrap.sh library.
-# Copy this file (plus the library) into a new consumer repo, or regenerate
-# both together via:
+# ============================================================================
+# EDIT THIS FILE — per-project customization lives here.
+#
+# This is the consumer-owned wrapper. Tune the SW_* arrays below to match
+# your project: extra packages, env var pass-through, files to chown,
+# read/write mount semantics.
+#
+# The heavy lifting (source .env, install deps, discover Consul/Vault,
+# install Docker, pull the image, build docker run, reclaim ownership of
+# init-env outputs) runs inside the vendored stackwiz-bootstrap.sh
+# library, which IS framework-managed — do not edit it. Refresh both
+# files together via:
 #
 #     docker run --rm -v "$PWD:/out" ghcr.io/chistokhinsv/stackwiz:latest \
 #         extract-bootstrap --output /out --force
-#
-# Rationale: everything a bootstrap has to do on the host (source .env,
-# install deps, discover Consul/Vault, install Docker from a signed apt
-# repo, pull the image with cache fallback, build the `docker run`
-# invocation, reclaim ownership of init-env outputs) is framework-owned
-# code that needs to stay in sync across all consumers. Inlining that
-# logic per-repo leads to drift bugs (e.g. the pre-SCR-150 `curl | sh`
-# pattern shipping in stacks long after the framework fixed it).
+# ============================================================================
 #
 # The SW_* variables below are all optional — defaults live in the
 # library. Override only what your project needs.
