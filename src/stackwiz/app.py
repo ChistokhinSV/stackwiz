@@ -1,7 +1,6 @@
 """Textual App shell and screen routing."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Literal
 
@@ -13,98 +12,10 @@ from stackwiz.consul_client import ConsulClient
 from stackwiz.discovery import ProbeResult
 from stackwiz.manifest import Manifest
 from stackwiz.state import State
+from stackwiz.tokens import build_backends
 from stackwiz.vault_client import VaultClient
 
 Mode = Literal["install", "uninstall"]
-
-
-def _read_sibling_state_token(state_dir: Path, filename: str) -> str | None:
-    """Search sibling consumer state dirs for ``filename``.
-
-    Namespaced state means each consumer owns its own dir
-    (``/var/lib/stackwiz/awx-platform/``, ``.../consul-vault-authentik-docker/``
-    etc.). Cross-consumer secrets (a consul ACL token written by 081, needed
-    by 061) live in one of those siblings. Falling back to a sibling is safe
-    — all namespaces on the same host share the same Vault/Consul backend.
-    Cross-host installs must provide the token via env or Vault shared path.
-    """
-    base = state_dir.parent
-    if not base.exists():
-        return None
-    for sibling in sorted(base.iterdir()):
-        if sibling == state_dir or not sibling.is_dir():
-            continue
-        candidate = sibling / filename
-        if candidate.exists():
-            try:
-                value = candidate.read_text().strip()
-                if value:
-                    return value
-            except OSError:
-                continue
-    return None
-
-
-def _resolve_consul_token(state_dir: Path, vault: VaultClient | None) -> str | None:
-    """Token resolution order: own state > CONSUL_HTTP_TOKEN env > sibling
-    state dirs > Vault ``shared/consul_bootstrap_token`` > anonymous.
-
-    On a successful non-trivial resolution (env / sibling / Vault), the token
-    is cached at ``<state_dir>/consul-http-token`` so subsequent runs skip the
-    fallback chain. This also makes cross-consumer deploys work even after the
-    operator removes the env var or 081 is uninstalled.
-    """
-    own = state_dir / "consul-http-token"
-    if own.exists():
-        value = own.read_text().strip()
-        if value:
-            return value
-
-    def _cache(token: str) -> str:
-        try:
-            state_dir.mkdir(parents=True, exist_ok=True)
-            own.write_text(token, encoding="utf-8")
-            try:
-                own.chmod(0o600)
-            except OSError:
-                pass
-        except OSError:
-            pass
-        return token
-
-    env_value = os.environ.get("CONSUL_HTTP_TOKEN", "").strip()
-    if env_value:
-        return _cache(env_value)
-    sibling = _read_sibling_state_token(state_dir, "consul-http-token")
-    if sibling:
-        return _cache(sibling)
-    # Try the engine-built Vault client first.
-    candidates: list[VaultClient] = []
-    if vault is not None and getattr(vault, "_token", None):
-        candidates.append(vault)
-    # Fallback: build a one-shot Vault client from the operator's
-    # VAULT_TOKEN env (set by bootstrap.sh) so the resolver can reach
-    # shared/consul_bootstrap_token even when the engine itself failed
-    # to acquire a vault token.
-    env_vault_token = os.environ.get("VAULT_TOKEN", "").strip()
-    if env_vault_token:
-        vault_addr = (
-            os.environ.get("VAULT_ADDR", "").strip()
-            or (vault.address if vault is not None else "")
-        )
-        if vault_addr:
-            try:
-                candidates.append(VaultClient(vault_addr, token=env_vault_token))
-            except Exception:  # noqa: BLE001
-                pass
-    for vc in candidates:
-        try:
-            data = vc.kv_get("shared/consul_bootstrap_token")
-            if data and data.get("value"):
-                return _cache(str(data["value"]))
-        except Exception:  # noqa: BLE001
-            continue
-    return None
 
 
 class InstallerApp(App[int]):
@@ -197,31 +108,12 @@ class InstallerApp(App[int]):
         self.push_screen(WelcomeScreen())
 
     def build_clients_from_probes(self) -> None:
-        """Instantiate Consul + Vault clients from the welcome-screen probes.
-
-        For Vault, we also pick up the persisted token from <state_dir>/vault-token
-        when one exists (written by consumers' vault install scripts during the
-        initial self-bootstrap run). Without this, re-runs via the TUI fail with
-        403 on any Vault operation because `VaultClient(addr)` alone falls back
-        to the VAULT_TOKEN env var, which is typically empty on re-runs.
-        """
-        # Build the Vault client first — it is the fallback source for the
-        # Consul ACL token on consumers that don't own consul themselves.
-        if self.vault_probe and self.vault_probe.reachable and self.vault_probe.address:
-            token_file = self.state_dir / "vault-token"
-            token = token_file.read_text().strip() if token_file.exists() else None
-            if not token:
-                token = _read_sibling_state_token(self.state_dir, "vault-token")
-            self.vault_client = VaultClient(self.vault_probe.address, token=token)
-            # Re-runs need the KV mount to exist (first run enables it lazily
-            # after vault installs; subsequent runs should re-ensure idempotently).
-            try:
-                self.vault_client.ensure_kv_mount()
-            except Exception:  # noqa: BLE001 — non-fatal; engine will log if it later fails
-                pass
-
-        if self.consul_probe and self.consul_probe.reachable and self.consul_probe.address:
-            consul_token = _resolve_consul_token(self.state_dir, self.vault_client)
-            self.consul_client = ConsulClient(
-                self.consul_probe.address, token=consul_token
-            )
+        """Instantiate Consul + Vault clients from the welcome-screen probes."""
+        if self.consul_probe is None or self.vault_probe is None:
+            return
+        self.consul_client, self.vault_client = build_backends(
+            self.state_dir,
+            self.consul_probe,
+            self.vault_probe,
+            ensure_kv_mount=True,
+        )

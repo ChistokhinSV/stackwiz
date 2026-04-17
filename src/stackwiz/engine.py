@@ -482,8 +482,8 @@ class Engine:
                 env["VAULT_TOKEN"] = token
         if self.consul is not None:
             env["CONSUL_HTTP_ADDR"] = self.consul.address
-            if self.consul._token:
-                env["CONSUL_HTTP_TOKEN"] = self.consul._token
+            if self.consul.token:
+                env["CONSUL_HTTP_TOKEN"] = self.consul.token
         env["STACKWIZ_STATE_DIR"] = self.state.host_path()
         # Host-side manifest dir — so nsenter scripts can find repo files
         # (the container's /manifest mount isn't visible from host PID 1).

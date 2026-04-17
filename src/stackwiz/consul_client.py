@@ -31,6 +31,10 @@ class ConsulClient:
             token=token,
         )
 
+    @property
+    def token(self) -> str | None:
+        return self._token
+
     # --- health / probe ---------------------------------------------------------
 
     def leader(self) -> str | None:

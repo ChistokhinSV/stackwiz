@@ -7,20 +7,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import sys
 from pathlib import Path
 from typing import Any
 
 from stackwiz import log as log_module
 from stackwiz.config_overrides import effective_config
-from stackwiz.consul_client import ConsulClient
 from stackwiz.discovery import probe_consul, probe_vault
 from stackwiz.engine import Engine, Status, StepEvent
 from stackwiz.executor import Executor
 from stackwiz.manifest import Manifest
 from stackwiz.state import State
-from stackwiz.vault_client import VaultClient
+from stackwiz.tokens import build_backends
 
 log = logging.getLogger("stackwiz.headless")
 
@@ -61,27 +59,16 @@ async def _run(
     consul_probe = await probe_consul(effective_domain, manifest.consul_host)
     vault_probe = await probe_vault(effective_domain, manifest.vault_host)
 
-    from stackwiz.app import _read_sibling_state_token, _resolve_consul_token
-
-    consul_client: ConsulClient | None = None
-    vault_client: VaultClient | None = None
-    # Build Vault first — it's a fallback source for the Consul ACL token.
-    if vault_probe.reachable and vault_probe.address:
-        token_file = state_dir / "vault-token"
-        token = token_file.read_text().strip() if token_file.exists() else None
-        if not token:
-            token = os.environ.get("VAULT_TOKEN", "").strip() or None
-        if not token:
-            token = _read_sibling_state_token(state_dir, "vault-token")
-        vault_client = VaultClient(vault_probe.address, token=token)
+    consul_client, vault_client = build_backends(
+        state_dir, consul_probe, vault_probe,
+    )
+    if vault_client is not None:
         print(f"[auto] vault: {vault_probe.address} ({vault_probe.source.value})")
     else:
         print(f"[auto] vault: not reachable ({vault_probe.detail})")
-    if consul_probe.reachable and consul_probe.address:
-        consul_token = _resolve_consul_token(state_dir, vault_client)
-        consul_client = ConsulClient(consul_probe.address, token=consul_token)
+    if consul_client is not None:
         print(f"[auto] consul: {consul_probe.address} ({consul_probe.source.value})"
-              f"{' (ACL token)' if consul_token else ' (no ACL token)'}")
+              f"{' (ACL token)' if consul_client.token else ' (no ACL token)'}")
     else:
         print(f"[auto] consul: not reachable ({consul_probe.detail})")
 

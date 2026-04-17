@@ -306,26 +306,21 @@ def render_info(
     """Called by `wizinstall info`. Builds clients from discovery probes."""
     import asyncio
 
+    from stackwiz.tokens import build_backends
+
     state = State(state_dir)
     effective_domain = state.config().get("domain", manifest.domain) or manifest.domain
-    consul_client: ConsulClient | None = None
-    vault_client: VaultClient | None = None
 
-    consul_probe = asyncio.run(probe_consul(effective_domain, manifest.consul_host))
-    if consul_probe.reachable and consul_probe.address:
-        token_file = state_dir / "consul-http-token"
-        token = token_file.read_text().strip() if token_file.exists() else None
-        if not token:
-            token = os.environ.get("CONSUL_HTTP_TOKEN", "").strip() or None
-        consul_client = ConsulClient(consul_probe.address, token=token)
+    async def _probe_both() -> tuple:
+        return (
+            await probe_consul(effective_domain, manifest.consul_host),
+            await probe_vault(effective_domain, manifest.vault_host),
+        )
 
-    vault_probe = asyncio.run(probe_vault(effective_domain, manifest.vault_host))
-    if vault_probe.reachable and vault_probe.address:
-        token_file = state_dir / "vault-token"
-        token = token_file.read_text().strip() if token_file.exists() else None
-        if not token:
-            token = os.environ.get("VAULT_TOKEN", "").strip() or None
-        vault_client = VaultClient(vault_probe.address, token=token)
+    consul_probe, vault_probe = asyncio.run(_probe_both())
+    consul_client, vault_client = build_backends(
+        state_dir, consul_probe, vault_probe,
+    )
 
     report = collect(manifest, state, consul_client, vault_client, show_secrets)
 
