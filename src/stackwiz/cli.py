@@ -317,17 +317,27 @@ def _describe(component: Component) -> str:
               help="Destination file (default: <manifest_dir>/.stackwiz.env).")
 @click.option("--force", is_flag=True, default=False,
               help="Overwrite the destination file if it already exists.")
+@click.argument("domain", required=False, default=None)
 def init_env(
     manifest_path: Path,
     state_dir: Path,  # noqa: ARG001 — unused but shared across subcommands
     output_path: Path | None,
     force: bool,
+    domain: str | None,
 ) -> None:
     """Generate a commented `.stackwiz.env` scaffold from the manifest.
 
     Reads every `config:` field + the top-level `domain:`, applies any
     existing overrides, and writes a YAML file with one entry per field
     plus a `# help:` comment line.
+
+    Optional positional DOMAIN argument — when supplied, the generated
+    file's top-level `domain:` is set to that value (and every
+    `${domain}`-derived field in the comments renders against it):
+
+    \b
+      wizinstall init-env                 # uses manifest's default domain
+      wizinstall init-env mycompany.lan   # overrides with mycompany.lan
 
     Operators edit the generated file once per deployment, then run
     `wizinstall run` — the TUI pre-fills every field from the file, and
@@ -339,12 +349,17 @@ def init_env(
     manifest_dir = manifest_path.parent.resolve()
     target = (output_path or manifest_dir / ".stackwiz.env").resolve()
     try:
-        result = scaffold_env_files(manifest, manifest_dir, target, force)
+        result = scaffold_env_files(
+            manifest, manifest_dir, target, force, domain=domain,
+        )
     except FileExistsError as exc:
         click.echo(
             f"error: {exc} already exists. Pass --force to overwrite.",
             err=True,
         )
+        sys.exit(2)
+    except ValueError as exc:
+        click.echo(f"error: {exc}", err=True)
         sys.exit(2)
 
     click.echo(f"wrote {result.env_file}")

@@ -105,6 +105,84 @@ def test_scaffold_env_file_chmod_best_effort(
     assert result.env_file.exists()
 
 
+# --- domain override (positional arg) ---------------------------------------
+
+
+def test_scaffold_uses_manifest_default_domain_when_unset(
+    manifest: Manifest, tmp_path: Path
+) -> None:
+    target = tmp_path / ".stackwiz.env"
+    scaffold_env_files(manifest, tmp_path, target, force=False)
+    text = target.read_text(encoding="utf-8")
+    # The fixture's manifest has `domain: example.internal`.
+    assert 'domain: "example.internal"' in text
+
+
+def test_scaffold_domain_override_injects_into_env_file(
+    manifest: Manifest, tmp_path: Path
+) -> None:
+    target = tmp_path / ".stackwiz.env"
+    scaffold_env_files(
+        manifest, tmp_path, target, force=False, domain="mycompany.lan",
+    )
+    text = target.read_text(encoding="utf-8")
+    assert 'domain: "mycompany.lan"' in text
+    # Fixture manifest's default is example.internal — make sure it's gone.
+    assert 'domain: "example.internal"' not in text
+
+
+def test_scaffold_domain_override_propagates_to_derived_hints(
+    tmp_path: Path,
+) -> None:
+    """Derived fields (auth.${domain}, admin@${domain}) must render against
+    the operator-supplied domain, not the manifest default."""
+    import yaml as _yaml
+    data = _yaml.safe_load(FIXTURE.read_text(encoding="utf-8"))
+    # Inject a ${domain}-derived field into the config: section.
+    data["config"].append({
+        "id": "app_hostname",
+        "label": "App hostname",
+        "type": "text",
+        "default": "app.${domain}",
+    })
+    target_manifest = tmp_path / "components.yaml"
+    target_manifest.write_text(_yaml.safe_dump(data), encoding="utf-8")
+    m = load_manifest(target_manifest)
+    env = tmp_path / ".stackwiz.env"
+    scaffold_env_files(m, tmp_path, env, force=False, domain="acme.test")
+    text = env.read_text(encoding="utf-8")
+    assert 'domain: "acme.test"' in text
+    # The derived hint line (commented) should show the substituted value,
+    # not the literal ${domain}.
+    assert "app.acme.test" in text
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["", "   ", "has spaces", "no/slashes", "foo..com", "-leadinghyphen.com",
+     "ends.with-", "foo.com/../etc"],
+)
+def test_scaffold_rejects_invalid_domain(
+    manifest: Manifest, tmp_path: Path, bad: str
+) -> None:
+    target = tmp_path / ".stackwiz.env"
+    with pytest.raises(ValueError, match="invalid domain"):
+        scaffold_env_files(manifest, tmp_path, target, force=False, domain=bad)
+
+
+@pytest.mark.parametrize(
+    "ok",
+    ["example.com", "sub.example.com", "my-lab.internal",
+     "a1.b2.c3", "localhost"],
+)
+def test_scaffold_accepts_valid_domains(
+    manifest: Manifest, tmp_path: Path, ok: str
+) -> None:
+    target = tmp_path / ".stackwiz.env"
+    scaffold_env_files(manifest, tmp_path, target, force=False, domain=ok)
+    assert target.exists()
+
+
 # --- write_bootstrap --------------------------------------------------------
 
 

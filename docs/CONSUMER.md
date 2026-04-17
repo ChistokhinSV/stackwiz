@@ -398,12 +398,14 @@ and the TUI config screen shows the resolved IP instead of "auto". Install scrip
 Instead of writing `.stackwiz.env` from scratch, generate a commented template from the manifest:
 
 ```bash
-wizinstall init-env --manifest components.yaml
-# wrote <manifest_dir>/.stackwiz.env
-# Edit it and re-run `wizinstall run` to pick up the overrides.
+./bootstrap.sh init-env                     # uses manifest's default domain
+./bootstrap.sh init-env mycompany.lan       # overrides with mycompany.lan
+./bootstrap.sh init-env --force lab.internal   # overwrite an existing file
 ```
 
-The generated file contains the deployment domain at the top (commented with an explanation), followed by one entry per `config:` field with:
+The optional positional `DOMAIN` argument sets the top-level `domain:` in the generated file — every `${domain}`-derived field (e.g. `auth.${domain}`, `admin@${domain}`) renders against it, so the operator can run `wizinstall run` immediately without hand-editing. Invalid domain strings (spaces, slashes, leading/trailing hyphens, `..`) are rejected at scaffold time rather than leaking into the install flow.
+
+The generated file contains the deployment domain at the top, followed by one entry per `config:` field with:
 - A `# <label>: <help>` header
 - `#   choices: ...` if the field is a `type: select`
 - `#   required` if the field is mandatory

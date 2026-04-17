@@ -11,6 +11,7 @@ user-facing output; these return structured results.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
@@ -24,6 +25,11 @@ from stackwiz.secrets_env import (
 )
 
 log = logging.getLogger("stackwiz.scaffold")
+
+# Conservative domain charset: dotted labels of alphanum + hyphen. Same shape
+# we use for hostnames elsewhere; rejects spaces, slashes, quoting tricks.
+_DOMAIN_LABEL = r"[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?"
+_DOMAIN_RE = re.compile(rf"^{_DOMAIN_LABEL}(\.{_DOMAIN_LABEL})*$")
 
 
 @dataclass
@@ -85,6 +91,7 @@ def scaffold_env_files(
     manifest_dir: Path,
     target: Path,
     force: bool,
+    domain: str | None = None,
 ) -> EnvScaffoldResult:
     """Write ``.stackwiz.env`` + optional companion files.
 
@@ -96,7 +103,13 @@ def scaffold_env_files(
         fields or when ``<manifest_dir>/.env.template`` exists
       * appends each of the above to ``<manifest_dir>/.gitignore`` if missing
 
+    When ``domain`` is provided, the generated file's top-level ``domain:``
+    is set to that value (instead of the manifest default) and every
+    ``${domain}``-derived field in the comments renders against it — so the
+    operator can immediately run ``wizinstall run`` without hand-editing.
+
     Raises ``FileExistsError`` if ``target`` exists and ``force`` is False.
+    Raises ``ValueError`` if ``domain`` is syntactically invalid.
     """
     target = target.resolve()
     if target.exists() and not force:
@@ -105,6 +118,17 @@ def scaffold_env_files(
     from stackwiz.config_overrides import effective_config
 
     existing = _try_read_existing_yaml(target)
+    if domain is not None:
+        domain = domain.strip()
+        if not domain or not _DOMAIN_RE.match(domain):
+            raise ValueError(
+                f"invalid domain '{domain}': expected dotted alphanumeric "
+                "labels (e.g. 'example.com', 'lab.mycompany.internal')"
+            )
+        # Inject the override before `effective_config` so derived fields
+        # (auth.${domain}, admin@${domain}) resolve against the new domain.
+        existing = dict(existing)
+        existing["domain"] = domain
     resolved, domain = effective_config(manifest, existing, None)
 
     target.parent.mkdir(parents=True, exist_ok=True)
