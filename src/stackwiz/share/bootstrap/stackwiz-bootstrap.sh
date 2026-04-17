@@ -277,6 +277,29 @@ if r:
   fi
 }
 
+# Remove distribution-provided Docker packages that conflict with docker-ce.
+# Per https://docs.docker.com/engine/install/debian/ "Uninstall old versions":
+# docker.io, docker-compose, docker-doc, podman-docker, containerd and runc
+# ship colliding binaries + runtimes. Installing docker-ce on top of them
+# leaves mixed state (duplicate containerd, wrong `docker` on PATH, unit
+# file conflicts). Scan dpkg first so the output is quiet on fresh hosts.
+#
+# Called only on the fresh-install path — if `command -v docker` already
+# succeeds (including distro-provided docker.io), sw_bootstrap_ensure_docker
+# takes the fast-path skip and never reaches here.
+sw_bootstrap_remove_conflicting_pkgs() {
+  local pkgs=(docker.io docker-compose docker-doc podman-docker containerd runc)
+  local to_remove=()
+  local p
+  for p in "${pkgs[@]}"; do
+    dpkg -s "$p" >/dev/null 2>&1 && to_remove+=("$p")
+  done
+  if [ "${#to_remove[@]}" -gt 0 ]; then
+    sw_log "removing conflicting Docker packages: ${to_remove[*]}"
+    sudo apt-get remove -y -qq "${to_remove[@]}"
+  fi
+}
+
 sw_bootstrap_ensure_docker() {
   if command -v docker >/dev/null; then
     sudo mkdir -p "${STACKWIZ_STATE_DIR}"
@@ -307,6 +330,11 @@ sw_bootstrap_ensure_docker() {
     sw_err "/etc/os-release missing VERSION_CODENAME; cannot pin apt suite."
     exit 1
   fi
+
+  # Purge conflicting distribution packages BEFORE adding the Docker repo
+  # so `apt install docker-ce ...` below doesn't hit the conflict Docker's
+  # own install guide warns about.
+  sw_bootstrap_remove_conflicting_pkgs
 
   sw_log "installing Docker from ${distro} apt repository (${codename})"
 
