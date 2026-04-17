@@ -559,13 +559,54 @@ class Engine:
     ) -> dict[str, MaterializedSecret]:
         """Probe for Vault after its install, adopt the client, and
         materialize secrets if they weren't already. Returns the possibly
-        refreshed ``materialized`` map."""
-        probe = await probe_vault(self.manifest.domain, self.manifest.vault_host)
-        if not (probe.reachable and probe.address):
-            return materialized
+        refreshed ``materialized`` map.
+
+        Two-stage probe:
+
+        1. Honor the operator's TLS-verify policy first (STACKWIZ_VAULT_VERIFY
+           / VAULT_CACERT) — picks up an externally-configured Vault cleanly.
+        2. On failure, if the install script just persisted ``vault-token``
+           to state, retry with ``verify=False``. Rationale: the script we
+           just ran generated a self-signed cert and wrote the root token to
+           disk; we know this is OUR Vault, trust-on-first-use is correct.
+
+        Loud warn-log on every failure path so the operator can diagnose if
+        downstream components later fail due to missing materialized secrets.
+        """
+        probe = await probe_vault(
+            self.manifest.domain, self.manifest.vault_host,
+        )
         token_file = self.state.state_dir / "vault-token"
-        token = token_file.read_text().strip() if token_file.exists() else None
-        self.vault = VaultClient(probe.address, token=token)
+        just_installed = token_file.exists()
+        if not (probe.reachable and probe.address) and just_installed:
+            log.warning(
+                "vault probe failed under current TLS policy (%s); the "
+                "install script just persisted vault-token so retrying with "
+                "verify=False (trust-on-first-use for freshly-issued "
+                "self-signed cert)", probe.detail,
+            )
+            probe = await probe_vault(
+                self.manifest.domain, self.manifest.vault_host,
+                verify_override=False,
+            )
+        if not (probe.reachable and probe.address):
+            log.warning(
+                "vault adoption: probe failed (%s). Downstream components "
+                "needing stackwiz-generated secrets will fail. Check that "
+                "the install script brought vault up and the engine can "
+                "reach it at vault.%s or 127.0.0.1:8200.",
+                probe.detail, self.manifest.domain,
+            )
+            return materialized
+        token = token_file.read_text().strip() if just_installed else None
+        # If we retried with verify=False, build the client the same way so
+        # subsequent hvac calls don't fail on the same self-signed cert.
+        vault_verify: bool | str | None = (
+            False if just_installed else None
+        )
+        self.vault = VaultClient(
+            probe.address, token=token, verify=vault_verify,
+        )
         log.info("vault adopted after install: %s", probe.address)
         try:
             self.vault.ensure_kv_mount()

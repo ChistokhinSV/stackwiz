@@ -47,6 +47,14 @@ _SW_BASE_ENV=(
   CONSUL_HTTP_ADDR
   VAULT_ADDR
   VAULT_TOKEN
+  # TLS-verify policy for Vault traffic. STACKWIZ_VAULT_VERIFY=false opts
+  # out (needed when Vault uses a self-signed cert that isn't in the
+  # container's trust bundle); VAULT_CACERT points at a custom CA file.
+  # Both must reach the installer container or the engine's probe / adopt
+  # logic and every install script sourcing stackwiz-bootstrap.sh's
+  # sw_vault_curl_tls would otherwise default to strict verify.
+  STACKWIZ_VAULT_VERIFY
+  VAULT_CACERT
   CF_DNS_API_TOKEN
   AWS_DNS_ACCESS_KEY_ID
   AWS_DNS_SECRET_ACCESS_KEY

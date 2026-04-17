@@ -110,15 +110,20 @@ async def probe_consul(
 async def probe_vault(
     domain: str,
     host_override: str | None = None,
+    verify_override: bool | str | None = None,
 ) -> ProbeResult:
     """Find a reachable Vault. Probe order mirrors `probe_consul`.
 
     TLS verification honors STACKWIZ_VAULT_VERIFY / VAULT_CACERT (see
     stackwiz.vault_client.resolve_verify). A token in env with an HTTP
     (plaintext) fallback is a misconfiguration; the caller is warn-logged.
+
+    ``verify_override`` lets the caller force a specific verify policy
+    (typically ``False``) — used by the engine's post-install adoption
+    hook to trust the self-signed cert the install script just generated.
     """
     health = "/v1/sys/health?standbyok=true&sealedok=true"
-    verify = resolve_verify()
+    verify = verify_override if verify_override is not None else resolve_verify()
     has_token = bool(os.environ.get("VAULT_TOKEN", "").strip())
 
     async def _try(host: str) -> str | None:
