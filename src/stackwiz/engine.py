@@ -101,27 +101,16 @@ class Engine:
         """
         self._stage_host_helpers()
         self.state.save_config(config_values)
-        # Resolve node IP for Consul service registration.
-        # Checks node_ip first, then any *_internal_ip field.
-        self._node_ip = str(
-            config_values.get("node_ip")
-            or next(
-                (v for k, v in config_values.items()
-                 if k.endswith("_internal_ip") and v),
-                "127.0.0.1",
-            )
-        )
+        self._node_ip = self._resolve_node_ip(config_values)
         actions = self.state.plan_actions(
             self.manifest, selected_ids, config_values, forced_refresh
         )
         # Re-register services for installed components missing from the
-        # catalog. Heals stacks that were originally installed before the
-        # engine could resolve a Consul ACL token (services were created
-        # anonymously, ACL rejected the writes, components got marked
-        # installed anyway, and the next run NOOP'd them — leaving the
-        # catalog empty forever).
+        # catalog. Heals stacks originally installed before the engine could
+        # resolve a Consul ACL token (services created anonymously, ACL
+        # rejected the writes, components marked installed anyway → next
+        # run NOOP'd them, leaving the catalog empty forever).
         self._catchup_registrations()
-        prefix = self.manifest.consul.service_prefix
         materialized: dict[str, MaterializedSecret] = {}
         if self.vault is not None:
             self._upload_user_secrets()
@@ -132,7 +121,9 @@ class Engine:
         for component in self.manifest.topo_order():
             action = actions[component.id]
             if action is Action.NOOP:
-                yield StepEvent(component.id, Status.SKIPPED, action, message="up to date")
+                yield StepEvent(
+                    component.id, Status.SKIPPED, action, message="up to date",
+                )
                 result.skipped.append(component.id)
                 continue
 
@@ -145,7 +136,6 @@ class Engine:
                 vault_token=install_token,
             )
             script = self._script_for_action(component, action)
-
             try:
                 async for event in self._run_script(component, action, script, env):
                     yield event
@@ -156,77 +146,15 @@ class Engine:
                 if install_token and self.vault is not None:
                     self.vault.revoke_token(install_token)
 
-            # Lazy backend bootstrap: after consul/vault installs, probe + adopt.
+            # Lazy backend adoption after the component that provides it.
             if component.id == "consul" and self.consul is None:
-                probe = await probe_consul(self.manifest.domain, self.manifest.consul_host)
-                if probe.reachable and probe.address:
-                    # If consul.sh persisted an HTTP token (because ACLs are
-                    # default-deny), read it and pass to the ConsulClient so
-                    # the engine can register services for later components.
-                    token_file = self.state.state_dir / "consul-http-token"
-                    token = token_file.read_text().strip() if token_file.exists() else None
-                    self.consul = ConsulClient(probe.address, token=token)
-                    log.info("consul adopted after install: %s", probe.address)
-                    # Retroactively register services for components that ran
-                    # BEFORE consul existed (e.g. 081 installs vault first,
-                    # then consul — without this, vault never gets a catalog
-                    # entry because the client was None when vault ran).
-                    for earlier in self.manifest.topo_order():
-                        if earlier.id == component.id:
-                            break
-                        for svc in earlier.all_consul_services():
-                            try:
-                                self.consul.register_service(
-                                    earlier, svc, node_address=self._node_ip,
-                                )
-                                log.info("%s: retroactively registered in consul as %s",
-                                         earlier.id, svc.name)
-                            except Exception as exc:  # noqa: BLE001
-                                log.warning("%s: retro consul register %s failed: %s",
-                                            earlier.id, svc.name, exc)
+                await self._adopt_consul_after_install(component)
             if component.id == "vault" and self.vault is None:
-                probe = await probe_vault(self.manifest.domain, self.manifest.vault_host)
-                if probe.reachable and probe.address:
-                    token_file = self.state.state_dir / "vault-token"
-                    token = token_file.read_text().strip() if token_file.exists() else None
-                    self.vault = VaultClient(probe.address, token=token)
-                    log.info("vault adopted after install: %s", probe.address)
-                    try:
-                        self.vault.ensure_kv_mount()
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning("vault kv mount failed: %s", exc)
-                    if not materialized:
-                        try:
-                            self._upload_user_secrets()
-                            materialized = materialize_secrets(self.manifest, self.vault)
-                            result.secrets = materialized
-                            log.info("materialized %d secrets", len(materialized))
-                        except Exception as exc:  # noqa: BLE001
-                            log.warning("secret materialization failed: %s", exc)
+                materialized = await self._adopt_vault_after_install(
+                    result, materialized,
+                )
 
-            services = component.all_consul_services()
-            if self.consul is not None:
-                for svc in services:
-                    try:
-                        self.consul.register_service(component, svc, node_address=self._node_ip)
-                        log.info("%s: registered in consul as %s",
-                                 component.id, svc.name)
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning("%s: consul register %s failed: %s",
-                                    component.id, svc.name, exc)
-
-            if self.consul is not None:
-                for key, value in self._kv_payload(config_values, component).items():
-                    try:
-                        self.consul.kv_put(f"{prefix}/config/{key}", str(value))
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning("%s: consul KV put %s failed: %s", component.id, key, exc)
-
-            if self.vault is not None and services:
-                try:
-                    self.vault.apply_service_policy(prefix, component.id)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("%s: vault policy failed: %s", component.id, exc)
+            self._post_component_publish(component, config_values)
 
             cfg_hash = component_config_hash(component, config_values)
             self.state.mark_installed(component, cfg_hash)
@@ -237,15 +165,7 @@ class Engine:
             "install finished: %d ok, %d failed, %d skipped",
             len(result.succeeded), len(result.failed), len(result.skipped),
         )
-
-        # Write summary.md at end of successful install
-        if not result.failed:
-            try:
-                from stackwiz.info import write_summary_md
-                write_summary_md(self.manifest, self.state, self.consul, self.vault)
-                log.info("summary written to %s", self.state.host_path("summary.md"))
-            except Exception as exc:  # noqa: BLE001
-                log.warning("summary.md write failed: %s", exc)
+        self._write_summary_md_if_ok(result)
 
     # --- uninstall --------------------------------------------------------------
 
@@ -471,43 +391,145 @@ class Engine:
             env["WIZ_MANIFEST_DIR"] = host_manifest
         return env
 
-    def _catchup_registrations(self) -> None:
-        """Re-register installed components whose services are missing.
+    # --- extracted install() helpers -------------------------------------------
 
-        Idempotent: probes the catalog first via discover() and only writes
-        for services that aren't there. Uses only the agent API — no
-        synthetic node entries, no catalog.register fallback. On stacks
-        with a clean catalog this is silent.
+    def _resolve_node_ip(self, config_values: dict[str, Any]) -> str:
+        """Pick the node address for Consul service registration.
+
+        Checks ``node_ip`` first, then any ``*_internal_ip`` field, falling
+        back to ``127.0.0.1``. The first non-empty match wins.
         """
+        return str(
+            config_values.get("node_ip")
+            or next(
+                (v for k, v in config_values.items()
+                 if k.endswith("_internal_ip") and v),
+                "127.0.0.1",
+            )
+        )
+
+    def _register_component_services(self, component: Component) -> None:
+        """Register all of a component's Consul services, skipping existing.
+
+        Idempotent: probes via ``discover()`` first; on existing entries the
+        registration is a no-op. All errors are warn-logged, never raised —
+        Consul registration is best-effort forensic metadata, not a gate.
+        """
+        if self.consul is None:
+            return
+        for svc in component.all_consul_services():
+            try:
+                if self.consul.discover(svc) is not None:
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "%s: discover %s failed: %s", component.id, svc.name, exc,
+                )
+                continue
+            try:
+                self.consul.register_service(
+                    component, svc, node_address=self._node_ip,
+                )
+                log.info(
+                    "%s: registered in consul as %s", component.id, svc.name,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "%s: consul register %s failed: %s",
+                    component.id, svc.name, exc,
+                )
+
+    def _catchup_registrations(self) -> None:
+        """Re-register installed components whose services are missing."""
         if self.consul is None:
             return
         installed = self.state.installed()
         for component in self.manifest.topo_order():
-            if component.id not in installed:
-                continue
-            for svc in component.all_consul_services():
+            if component.id in installed:
+                self._register_component_services(component)
+
+    async def _adopt_consul_after_install(self, current: Component) -> None:
+        """Probe for Consul after its own install, adopt the client, and
+        retroactively register services for components that ran before it."""
+        probe = await probe_consul(self.manifest.domain, self.manifest.consul_host)
+        if not (probe.reachable and probe.address):
+            return
+        token_file = self.state.state_dir / "consul-http-token"
+        token = token_file.read_text().strip() if token_file.exists() else None
+        self.consul = ConsulClient(probe.address, token=token)
+        log.info("consul adopted after install: %s", probe.address)
+        # Register services for components that ran BEFORE consul existed
+        # (e.g. 081 installs vault first, then consul).
+        for earlier in self.manifest.topo_order():
+            if earlier.id == current.id:
+                break
+            self._register_component_services(earlier)
+
+    async def _adopt_vault_after_install(
+        self,
+        result: EngineResult,
+        materialized: dict[str, MaterializedSecret],
+    ) -> dict[str, MaterializedSecret]:
+        """Probe for Vault after its install, adopt the client, and
+        materialize secrets if they weren't already. Returns the possibly
+        refreshed ``materialized`` map."""
+        probe = await probe_vault(self.manifest.domain, self.manifest.vault_host)
+        if not (probe.reachable and probe.address):
+            return materialized
+        token_file = self.state.state_dir / "vault-token"
+        token = token_file.read_text().strip() if token_file.exists() else None
+        self.vault = VaultClient(probe.address, token=token)
+        log.info("vault adopted after install: %s", probe.address)
+        try:
+            self.vault.ensure_kv_mount()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vault kv mount failed: %s", exc)
+        if materialized:
+            return materialized
+        try:
+            self._upload_user_secrets()
+            fresh = materialize_secrets(self.manifest, self.vault)
+            result.secrets = fresh
+            log.info("materialized %d secrets", len(fresh))
+            return fresh
+        except Exception as exc:  # noqa: BLE001
+            log.warning("secret materialization failed: %s", exc)
+            return materialized
+
+    def _post_component_publish(
+        self, component: Component, config_values: dict[str, Any],
+    ) -> None:
+        """After a component's install script succeeds, publish its Consul
+        services, KV config, and apply the runtime read-only Vault policy."""
+        prefix = self.manifest.consul.service_prefix
+        if self.consul is not None:
+            self._register_component_services(component)
+            for key, value in self._kv_payload(config_values, component).items():
                 try:
-                    if self.consul.discover(svc) is not None:
-                        continue
+                    self.consul.kv_put(f"{prefix}/config/{key}", str(value))
                 except Exception as exc:  # noqa: BLE001
                     log.warning(
-                        "%s: catchup discover %s failed: %s",
-                        component.id, svc.name, exc,
+                        "%s: consul KV put %s failed: %s",
+                        component.id, key, exc,
                     )
-                    continue
-                try:
-                    self.consul.register_service(
-                        component, svc, node_address=self._node_ip,
-                    )
-                    log.info(
-                        "%s: catchup-registered in consul as %s",
-                        component.id, svc.name,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    log.warning(
-                        "%s: catchup register %s failed: %s",
-                        component.id, svc.name, exc,
-                    )
+        if self.vault is not None and component.all_consul_services():
+            try:
+                self.vault.apply_service_policy(prefix, component.id)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("%s: vault policy failed: %s", component.id, exc)
+
+    def _write_summary_md_if_ok(self, result: EngineResult) -> None:
+        """Write state_dir/summary.md when every selected component succeeded."""
+        if result.failed:
+            return
+        try:
+            from stackwiz.info import write_summary_md
+            write_summary_md(
+                self.manifest, self.state, self.consul, self.vault,
+            )
+            log.info("summary written to %s", self.state.host_path("summary.md"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("summary.md write failed: %s", exc)
 
     def _kv_payload(
         self, config_values: dict[str, Any], component: Component
