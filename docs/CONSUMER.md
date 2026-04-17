@@ -18,9 +18,10 @@ This is the reference for anyone writing a new stackwiz-based installer — a pe
 
 ## Prerequisites on the target host
 
-Ubuntu 22.04+, Debian 12+, or RHEL-family systemd. Required:
+Debian 12+ or Ubuntu 22.04+ with `apt-get`. RHEL/Fedora/Alpine: install Docker manually before running bootstrap.sh. Required on the host:
 
-- `docker` (bootstrap.sh installs it via `curl get.docker.com` if missing)
+- `docker` (bootstrap.sh installs it from Docker's official signed apt
+  repository if missing — pins the GPG key to `/etc/apt/keyrings/docker.asc`)
 - `bash`
 - `curl` / `ca-certificates`
 - network access to `ghcr.io`

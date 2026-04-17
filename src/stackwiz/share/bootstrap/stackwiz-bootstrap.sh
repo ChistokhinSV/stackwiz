@@ -278,10 +278,55 @@ if r:
 }
 
 sw_bootstrap_ensure_docker() {
-  if ! command -v docker >/dev/null; then
-    sw_log "installing Docker..."
-    curl -fsSL https://get.docker.com | sudo sh
+  if command -v docker >/dev/null; then
+    sudo mkdir -p "${STACKWIZ_STATE_DIR}"
+    return 0
   fi
+
+  # Install via Docker's official signed apt repository. Avoids the
+  # unverified `curl | sh` pattern: the GPG key is pinned on disk and
+  # apt verifies every package signature against it.
+  if ! command -v apt-get >/dev/null 2>&1 || [ ! -f /etc/os-release ]; then
+    sw_err "Docker install requires apt-get (Debian/Ubuntu host)."
+    sw_err "Install Docker for your distro and re-run bootstrap."
+    exit 1
+  fi
+
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  local distro="${ID:-}" codename="${VERSION_CODENAME:-}"
+  case "$distro" in
+    debian|ubuntu) ;;
+    *)
+      sw_err "unsupported distro '$distro' for auto Docker install."
+      sw_err "Install Docker manually and re-run bootstrap."
+      exit 1
+      ;;
+  esac
+  if [ -z "$codename" ]; then
+    sw_err "/etc/os-release missing VERSION_CODENAME; cannot pin apt suite."
+    exit 1
+  fi
+
+  sw_log "installing Docker from ${distro} apt repository (${codename})"
+
+  local keyring="/etc/apt/keyrings/docker.asc"
+  local listfile="/etc/apt/sources.list.d/docker.list"
+  sudo install -m 0755 -d /etc/apt/keyrings
+  sudo curl -fsSL "https://download.docker.com/linux/${distro}/gpg" \
+    -o "${keyring}"
+  sudo chmod a+r "${keyring}"
+
+  local arch
+  arch=$(dpkg --print-architecture)
+  echo "deb [arch=${arch} signed-by=${keyring}] https://download.docker.com/linux/${distro} ${codename} stable" \
+    | sudo tee "${listfile}" >/dev/null
+
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq \
+    docker-ce docker-ce-cli containerd.io \
+    docker-buildx-plugin docker-compose-plugin
+
   sudo mkdir -p "${STACKWIZ_STATE_DIR}"
 }
 
