@@ -18,7 +18,7 @@ import dns.exception
 import dns.resolver
 import httpx
 
-from stackwiz.vault_client import resolve_verify, suppress_insecure_warnings
+from stackwiz.backends.common import resolve_verify, suppress_insecure_warnings
 
 log = logging.getLogger("stackwiz.discovery")
 

@@ -7,8 +7,8 @@ from urllib.parse import urlparse
 
 import consul
 
+from stackwiz.backends.common import resolve_backend_timeout
 from stackwiz.manifest import Component, ConsulService
-from stackwiz.vault_client import resolve_backend_timeout
 
 log = logging.getLogger("stackwiz.consul")
 
