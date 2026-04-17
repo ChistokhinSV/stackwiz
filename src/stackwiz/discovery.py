@@ -67,6 +67,35 @@ async def _http_ok(
         return False
 
 
+async def _vault_http_ok(
+    url: str, timeout: float = 2.5, verify: bool | str = True
+) -> bool:
+    """Stricter probe for Vault's sys/health endpoint.
+
+    Rejects the "Client sent an HTTP request to an HTTPS server" response
+    that an HTTPS-only Vault emits with status 400 when spoken to over
+    plaintext — plain ``_http_ok`` treats that as success (400 < 500) and
+    leads the engine to adopt an ``http://`` URL on which every subsequent
+    hvac call fails. Vault's health endpoint always replies with a JSON
+    body; anything else is a false positive.
+    """
+    if verify is False:
+        suppress_insecure_warnings()
+    try:
+        async with httpx.AsyncClient(timeout=timeout, verify=verify) as client:
+            response = await client.get(url)
+    except (httpx.RequestError, httpx.HTTPError):
+        return False
+    if response.status_code >= 500:
+        return False
+    body = response.text
+    if "HTTP request to an HTTPS" in body:
+        return False
+    # Vault returns JSON for all sys/health statuses (200/429/473/501/503).
+    stripped = body.lstrip()
+    return stripped.startswith("{")
+
+
 def _normalize_addr(raw: str, default_port: int, default_scheme: str = "http") -> str:
     addr = raw.strip()
     if not addr:
@@ -129,7 +158,7 @@ async def probe_vault(
     async def _try(host: str) -> str | None:
         # HTTPS first (verify-aware) — TLS-enabled Vault refuses plain HTTP.
         url = f"https://{host}:{VAULT_DEFAULT_PORT}"
-        if await _http_ok(f"{url}{health}", verify=verify):
+        if await _vault_http_ok(f"{url}{health}", verify=verify):
             return url
         # HTTP fallback only when no token is in scope; otherwise skip so we
         # don't leak the token over plaintext.
@@ -141,14 +170,14 @@ async def probe_vault(
             )
             return None
         url = f"http://{host}:{VAULT_DEFAULT_PORT}"
-        if await _http_ok(f"{url}{health}", verify=False):
+        if await _vault_http_ok(f"{url}{health}", verify=False):
             return url
         return None
 
     env_addr = os.environ.get("VAULT_ADDR", "").strip()
     if env_addr:
         addr = _normalize_addr(env_addr, VAULT_DEFAULT_PORT)
-        if await _http_ok(f"{addr}{health}", verify=verify):
+        if await _vault_http_ok(f"{addr}{health}", verify=verify):
             return ProbeResult(Source.ENV, addr, "VAULT_ADDR")
 
     host = host_override or f"vault.{domain}"

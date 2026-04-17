@@ -14,14 +14,26 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VAULT_ADDR", raising=False)
 
 
+_VAULT_HEALTH_BODY = (
+    '{"initialized":true,"sealed":false,"standby":false,"version":"1.21.4"}'
+)
+
+
 def _install_http_mock(monkeypatch: pytest.MonkeyPatch, reachable: set[str]) -> None:
-    """Replace httpx.AsyncClient.get with a predicate on the URL."""
+    """Replace httpx.AsyncClient.get with a predicate on the URL.
+
+    Vault sys/health URLs get a JSON body so the strict vault probe (which
+    rejects non-JSON responses to avoid being fooled by Vault's HTTPS-only
+    "Client sent an HTTP request..." 400) sees a valid-looking reply.
+    """
 
     async def fake_get(
         self: httpx.AsyncClient, url: str, *a: object, **kw: object
     ) -> httpx.Response:
         for prefix in reachable:
             if url.startswith(prefix):
+                if "/v1/sys/health" in url:
+                    return httpx.Response(200, text=_VAULT_HEALTH_BODY)
                 return httpx.Response(200, text="ok")
         raise httpx.ConnectError("refused", request=httpx.Request("GET", url))
 
@@ -109,7 +121,7 @@ async def test_vault_verify_override_plumbs_through(
         # httpx.AsyncClient stores `verify` on the client; peek at it here.
         captured.append(self._transport._pool._ssl_context is None  # type: ignore[attr-defined]
                         or "verify-captured")
-        return httpx.Response(200, text="ok")
+        return httpx.Response(200, text=_VAULT_HEALTH_BODY)
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
     _install_dns_mock(monkeypatch, {"vault.example.internal"})
@@ -121,3 +133,40 @@ async def test_vault_verify_override_plumbs_through(
     # result; actual verify=False wiring is exercised in the vault_client
     # ctor tests.
     assert r.reachable, f"probe should succeed with verify_override=False: {r}"
+
+
+async def test_vault_rejects_http_on_https_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: Vault's HTTPS listener replies with HTTP/1.0 400 + body
+    "Client sent an HTTP request to an HTTPS server" when spoken to over
+    plain HTTP. The old _http_ok (status < 500) accepted that as a live
+    target and the engine then adopted http://127.0.0.1:8200, causing every
+    subsequent hvac call to fail with the same sentinel. probe_vault must
+    treat that response as NOT reachable so the retry path (verify=False
+    over HTTPS) gets a chance to run."""
+
+    async def fake_get(
+        self: httpx.AsyncClient, url: str, *a: object, **kw: object
+    ) -> httpx.Response:
+        if url.startswith("https://"):
+            # Mirror the httpx behavior when a client rejects a self-signed
+            # cert — verify failures raise; the caller treats it as not-ok.
+            raise httpx.ConnectError(
+                "self-signed cert",
+                request=httpx.Request("GET", url),
+            )
+        if url.startswith("http://"):
+            # Exactly what Vault's HTTPS listener emits for plain-HTTP GETs.
+            return httpx.Response(
+                400, text="Client sent an HTTP request to an HTTPS server.\n",
+            )
+        raise httpx.ConnectError("refused", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    _install_dns_mock(monkeypatch, {"vault.example.internal"})
+    r = await probe_vault("example.internal")
+    assert r.source is Source.MISSING, (
+        f"probe must NOT report http:// as reachable when the server is "
+        f"HTTPS-only; got {r}"
+    )
