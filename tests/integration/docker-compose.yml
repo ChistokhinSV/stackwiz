@@ -1,0 +1,40 @@
+# Dev-mode Vault + Consul for stackwiz integration tests.
+#
+# Vault: dev server with a fixed root token so the tests can authenticate
+# deterministically. Data is in-memory and gone when the container stops.
+# Consul: dev agent with no ACLs — simplest path to a working catalog.
+#
+# Ports are offset from defaults (18200 / 18500) so a developer's local
+# dev stacks on 8200/8500 aren't disturbed by a `pytest -m integration`.
+services:
+  vault:
+    image: hashicorp/vault:1.17
+    container_name: stackwiz-it-vault
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: stackwiz-it-root
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    ports:
+      - "18200:8200"
+    healthcheck:
+      # `vault status` in dev mode exits 0 when unsealed.
+      test: ["CMD", "wget", "-qO-", "--tries=1", "http://127.0.0.1:8200/v1/sys/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 3s
+
+  consul:
+    image: hashicorp/consul:1.19
+    container_name: stackwiz-it-consul
+    command: >
+      agent -dev -client=0.0.0.0 -ui -log-level=warn
+    ports:
+      - "18500:8500"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "--tries=1", "http://127.0.0.1:8500/v1/status/leader"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 3s

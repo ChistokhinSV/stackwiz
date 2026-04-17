@@ -1,0 +1,28 @@
+schema_version: 1
+name: stackwiz-it-minimal
+display_name: "stackwiz integration smoke"
+version: "0.0.1"
+domain: "it.stackwiz.local"
+
+# Force localhost at custom ports so the engine probes the docker-compose
+# services that conftest.py spins up, not whatever is on 8200/8500.
+vault_host: "127.0.0.1:18200"
+consul_host: "127.0.0.1:18500"
+
+consul:
+  required: true
+  service_prefix: "it"
+
+components:
+  - id: hello
+    name: "Hello World"
+    version: "0.0.1"
+    required: true
+    default: true
+    install: install/hello.sh
+
+config:
+  - id: greeting
+    label: "Greeting"
+    type: text
+    default: "hello"

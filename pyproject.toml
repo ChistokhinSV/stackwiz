@@ -51,3 +51,10 @@ select = ["E", "F", "W", "I", "B", "UP"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Integration tests spin up real Vault + Consul via docker-compose (see
+# tests/integration/). Exclude them from the default run so dev feedback
+# stays fast; invoke explicitly via `pytest -m integration`.
+markers = [
+    "integration: slow, requires docker-compose (Vault + Consul)",
+]
+addopts = "-m 'not integration'"

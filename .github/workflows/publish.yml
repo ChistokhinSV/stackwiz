@@ -18,8 +18,24 @@ jobs:
         env:
           STACKWIZ_EXECUTOR_MODE: direct
 
-  image:
+  integration:
+    # Docker is always available on ubuntu-latest GitHub runners. The suite
+    # spins up Vault + Consul via docker-compose through conftest fixtures
+    # (see tests/integration/). On other runners (self-hosted, macos) the
+    # fixtures fall back to a graceful skip.
     needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v8.0.0
+      - run: uv sync --extra dev
+      - name: Run integration suite
+        run: uv run pytest -m integration -v --tb=short
+        env:
+          STACKWIZ_EXECUTOR_MODE: direct
+
+  image:
+    needs: [test, integration]
     runs-on: ubuntu-latest
     permissions:
       contents: read
