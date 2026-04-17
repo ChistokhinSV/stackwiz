@@ -298,3 +298,32 @@ class VaultClient:
             self._client.auth.token.revoke(token=token)
         except hvac.exceptions.VaultError:
             pass
+
+
+def shred_vault_init(state_dir: Path) -> Path | None:
+    """Securely delete `<state_dir>/vault-init.json`.
+
+    Returns the path that was removed, or None if the file didn't exist.
+    Overwrites the on-disk bytes before unlinking so a forensic recover-
+    from-disk attack would need to race the kernel's block allocator. On
+    filesystems with copy-on-write (btrfs, ZFS) or flash wear-levelling
+    (SSDs) the overwrite is best-effort — operators should still treat
+    "off-host backup + re-init" as the only true rotation path.
+    """
+    target = Path(state_dir) / "vault-init.json"
+    if not target.exists():
+        return None
+    try:
+        size = target.stat().st_size
+        with open(target, "r+b") as f:
+            f.write(b"\x00" * size)
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError as exc:
+        log.warning("shred overwrite failed on %s: %s", target, exc)
+    try:
+        target.unlink()
+    except OSError as exc:
+        log.warning("shred unlink failed on %s: %s", target, exc)
+        return None
+    return target

@@ -5,6 +5,7 @@ spinning up a real Vault.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import hvac
@@ -15,6 +16,7 @@ from stackwiz.vault_client import (
     VaultClient,
     resolve_backend_timeout,
     resolve_verify,
+    shred_vault_init,
 )
 
 
@@ -161,3 +163,38 @@ def test_vault_client_passes_timeout_to_hvac(
         hvac_cls.return_value = MagicMock()
         VaultClient("https://vault.example", token="t")
         assert hvac_cls.call_args.kwargs["timeout"] == 7.0
+
+
+# --- shred_vault_init -------------------------------------------------------
+
+
+def test_shred_removes_file(tmp_path: Path) -> None:
+    target = tmp_path / "vault-init.json"
+    target.write_text('{"root_token": "s.secret", "unseal_keys": ["a","b"]}')
+    removed = shred_vault_init(tmp_path)
+    assert removed == target
+    assert not target.exists()
+
+
+def test_shred_noop_when_missing(tmp_path: Path) -> None:
+    assert shred_vault_init(tmp_path) is None
+
+
+def test_shred_overwrites_before_unlinking(tmp_path: Path) -> None:
+    # Use a sentinel: we can't read the file after unlink, but we can hook
+    # the Path.unlink call to inspect bytes just before deletion.
+    target = tmp_path / "vault-init.json"
+    target.write_text("ROOT_TOKEN_IN_CLEARTEXT_!!!")
+    original_size = target.stat().st_size
+
+    captured: dict[str, bytes] = {}
+    real_unlink = Path.unlink
+
+    def peek_and_unlink(self: Path, *args, **kwargs) -> None:
+        if self == target:
+            captured["bytes"] = self.read_bytes()
+        real_unlink(self, *args, **kwargs)
+
+    with patch.object(Path, "unlink", peek_and_unlink):
+        shred_vault_init(tmp_path)
+    assert captured["bytes"] == b"\x00" * original_size

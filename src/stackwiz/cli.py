@@ -400,6 +400,44 @@ def extract_bootstrap(output_dir: Path | None, stub_name: str, force: bool) -> N
     click.echo("Edit the SW_* arrays in the stub, then: ./bootstrap.sh validate")
 
 
+@main.command("vault-shred-init")
+@_shared_opts
+@click.option("--yes", "confirmed", is_flag=True, default=False,
+              help="Skip interactive confirmation. Use in automation.")
+def vault_shred_init(
+    manifest_path: Path,
+    state_dir: Path,
+    confirmed: bool,
+) -> None:
+    """Securely delete <state_dir>/vault-init.json.
+
+    vault-init.json contains the Vault root token and unseal keys in
+    cleartext. It must be backed up off-host and then deleted. This
+    subcommand overwrites the on-disk bytes with zeros + fsyncs + unlinks.
+    Best-effort against forensic recovery on COW / flash; the real
+    rotation path is "off-host backup + re-init".
+    """
+    from stackwiz.vault_client import shred_vault_init
+
+    manifest = _load(manifest_path)
+    state_dir = _resolve_state_dir(state_dir, manifest)
+    target = state_dir / "vault-init.json"
+    if not target.exists():
+        click.echo(f"ok: {target} does not exist", err=True)
+        return
+    if not confirmed:
+        click.echo(
+            "This will PERMANENTLY delete the Vault root token and unseal keys.\n"
+            "You MUST have copied vault-init.json off this host already."
+        )
+        click.confirm("Proceed with shred?", abort=True)
+    removed = shred_vault_init(state_dir)
+    if removed is None:
+        click.echo("error: shred failed (see stderr)", err=True)
+        sys.exit(1)
+    click.echo(f"shredded {removed}")
+
+
 @main.command()
 @_shared_opts
 @click.option("--show-secrets", is_flag=True, default=False,
