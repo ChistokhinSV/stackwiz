@@ -30,8 +30,9 @@ Debian 12+ or Ubuntu 22.04+ with `apt-get`. RHEL/Fedora/Alpine: install Docker m
 
 ```
 <your-project-repo>/
-├── bootstrap.sh            # ~10 lines; thin stub that sources stackwiz-bootstrap.sh
-├── stackwiz-bootstrap.sh   # vendored shared library (refreshed via `wizinstall extract-bootstrap`)
+├── bootstrap.sh            # framework-managed launcher (refreshed via extract-bootstrap, do not edit)
+├── bootstrap.conf.sh       # consumer-owned SW_* overrides (EDIT ME — preserved across refreshes)
+├── stackwiz-bootstrap.sh   # framework-managed library (refreshed via extract-bootstrap, do not edit)
 ├── components.yaml         # manifest
 ├── install/                # per-component bash scripts
 │   ├── consul.sh
@@ -265,34 +266,47 @@ envsubst '${AUTHENTIK_HOSTNAME} ${LDAP_BASE_DN}' \
 
 Always whitelist your envsubst variables — bare `envsubst` mangles YAML tags like `!Find` and `!KeyOf`.
 
-## Bootstrap.sh — stub + shared library
+## Bootstrap — three files, one editable
 
-Consumers ship a ~10-line stub that declares only their project-specific knobs. The heavy lifting — `.env` sourcing, prereq install, Consul/Vault auto-discovery, Docker install, image pull with cache fallback, TTY/headless detection, `docker run` with correct mounts and env passthrough, post-run `chown` — lives in the framework-supplied `stackwiz-bootstrap.sh` library.
+Consumers ship three files alongside their manifest:
 
-### 1. Extract the library into your repo
+| File | Owner | Edit? |
+|---|---|---|
+| `stackwiz-bootstrap.sh` | framework | **no** — refresh with `extract-bootstrap --force` |
+| `bootstrap.sh` | framework | **no** — thin launcher, same refresh path |
+| `bootstrap.conf.sh` | consumer | **yes** — SW_* overrides live here |
+
+The heavy lifting — `.env` sourcing, prereq install, Consul/Vault auto-discovery, Docker install, image pull with cache fallback, TTY/headless detection, `docker run` with correct mounts and env passthrough, post-run `chown` — lives in `stackwiz-bootstrap.sh`. The launcher is a verbatim ~30-line wrapper that sources the config (if present) and delegates to the library. Everything project-specific goes in the config.
+
+Why split: `--force` refreshes the framework-managed pair without clobbering per-project customization. Git pulls of upstream fixes become zero-conflict.
+
+### 1. Extract the triplet into your repo
 
 ```bash
-# Run once when creating a new consumer; re-run to refresh to a newer version.
+# Run once when creating a new consumer; re-run with --force to refresh.
 docker run --rm -v "$PWD:/out" ghcr.io/chistokhinsv/stackwiz:latest \
     extract-bootstrap --output /out --force
 ```
 
-This writes `stackwiz-bootstrap.sh` (the library, commit this to the repo alongside your manifest) and a starter `bootstrap.sh` stub. Vendoring the library makes bootstrap work on air-gapped hosts — no network round-trip to GitHub at run time.
+This writes:
 
-**`stackwiz-bootstrap.sh` has no editable template — the framework file is the source of truth.** The canonical copy lives at [`src/stackwiz/share/bootstrap/stackwiz-bootstrap.sh`](../src/stackwiz/share/bootstrap/stackwiz-bootstrap.sh) in the framework repo and is bundled into the wheel; `extract-bootstrap` copies it verbatim. Only the stub has a template (`docs/bootstrap.sh.template`) because the stub is the part consumers customize. Treat the vendored `stackwiz-bootstrap.sh` in your repo as read-only — don't hand-edit it. To adopt upstream fixes (security patches, new helpers), re-run the extract command to refresh the vendored copy; see [Refreshing the library](#refreshing-the-library) below.
+- `stackwiz-bootstrap.sh` (library, ~1300 lines — commit verbatim)
+- `bootstrap.sh` (launcher, ~30 lines — commit verbatim)
+- `bootstrap.conf.sh` (config, created only if absent — this one you edit)
 
-### 2. Minimal stub
+Vendoring the library makes bootstrap work on air-gapped hosts — no network round-trip to GitHub at run time. The `--force` flag overwrites the library + launcher but **never** touches `bootstrap.conf.sh`; that's the whole point of the split.
+
+### 2. Minimal `bootstrap.conf.sh`
+
+All SW_* vars are optional — the library has sensible defaults. Override only what your project needs:
 
 ```bash
 #!/usr/bin/env bash
-set -euo pipefail
+# My Stack — stackwiz bootstrap config (the ONE editable piece).
 
 SW_REQUIRED_PKGS=(curl ca-certificates jq openssl gettext-base python3)
 SW_EXTRA_ENV=(CONSUL_HTTP_TOKEN)
 SW_CHOWN_FILES=(.stackwiz.env .stackwiz.secrets.env .env)
-
-. "$(dirname "$0")/stackwiz-bootstrap.sh"
-sw_bootstrap_main "$@"
 ```
 
 ### 3. Tuning knobs (all `SW_*` vars are optional — defaults shown)
@@ -309,16 +323,16 @@ sw_bootstrap_main "$@"
 
 Canonical env vars always propagated: `CONSUL_HTTP_ADDR`, `VAULT_ADDR`, `VAULT_TOKEN`, `CF_DNS_API_TOKEN`, `AWS_DNS_ACCESS_KEY_ID`, `AWS_DNS_SECRET_ACCESS_KEY`, `CERTBOT_EMAIL`, `STACKWIZ_TLS_FORCE`, plus host path hints `STACKWIZ_HOST_STATE_DIR`, `STACKWIZ_HOST_MANIFEST_DIR`.
 
-### Refreshing the library
+### Refreshing the framework files
 
 ```bash
 docker run --rm -v "$PWD:/out" ghcr.io/chistokhinsv/stackwiz:latest \
     extract-bootstrap --output /out --force
-git diff stackwiz-bootstrap.sh    # review changes
-git add stackwiz-bootstrap.sh
+git diff stackwiz-bootstrap.sh bootstrap.sh    # review changes
+git add stackwiz-bootstrap.sh bootstrap.sh
 ```
 
-The pinned copy is intentional: consumers decide when to adopt library changes; the framework doesn't silently mutate bootstrap behaviour under them.
+`bootstrap.conf.sh` is preserved across refreshes. The pinned library+launcher is intentional: consumers decide when to adopt framework changes; the framework doesn't silently mutate bootstrap behaviour under them.
 
 Usage:
 

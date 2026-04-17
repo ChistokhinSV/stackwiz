@@ -1,26 +1,21 @@
 #!/usr/bin/env bash
-# stackwiz consumer bootstrap stub.
+# stackwiz consumer bootstrap config (the ONE editable piece).
 #
 # ============================================================================
 # EDIT THIS FILE — per-project customization lives here.
 #
-# This is the consumer-owned wrapper. Tune the SW_* arrays below to match
-# your project: extra packages, env var pass-through, files to chown,
-# read/write mount semantics.
+# Tune the SW_* arrays below: extra packages, env var pass-through, files
+# to chown, read/write mount semantics. All variables are optional —
+# defaults live in the library.
 #
-# The heavy lifting (source .env, install deps, discover Consul/Vault,
-# install Docker, pull the image, build docker run, reclaim ownership of
-# init-env outputs) runs inside the vendored stackwiz-bootstrap.sh
-# library, which IS framework-managed — do not edit it. Refresh both
-# files together via:
+# The paired bootstrap.sh launcher and stackwiz-bootstrap.sh library are
+# BOTH framework-managed — do not edit them. Refresh them together via:
 #
 #     docker run --rm -v "$PWD:/out" ghcr.io/chistokhinsv/stackwiz:latest \
 #         extract-bootstrap --output /out --force
-# ============================================================================
 #
-# The SW_* variables below are all optional — defaults live in the
-# library. Override only what your project needs.
-set -euo pipefail
+# which overwrites the framework pair but preserves THIS file.
+# ============================================================================
 
 # Host packages to ensure before the installer container runs.
 # Drop jq/openssl/envsubst if your install scripts don't use them.
@@ -49,6 +44,3 @@ SW_READONLY_CMDS=(validate list info)
 
 # CLI args that imply headless mode (no -it, no pty).
 SW_HEADLESS_ARGS=(--auto --validate validate list info init-env)
-
-. "$(dirname "$0")/stackwiz-bootstrap.sh"
-sw_bootstrap_main "$@"

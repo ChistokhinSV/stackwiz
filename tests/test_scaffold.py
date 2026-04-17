@@ -7,7 +7,8 @@ import pytest
 
 from stackwiz.manifest import Manifest, load_manifest
 from stackwiz.scaffold import (
-    BOOTSTRAP_STUB_TEMPLATE,
+    BOOTSTRAP_CONFIG_TEMPLATE,
+    read_bootstrap_launcher_text,
     read_bootstrap_library_text,
     scaffold_env_files,
     write_bootstrap,
@@ -186,19 +187,26 @@ def test_scaffold_accepts_valid_domains(
 # --- write_bootstrap --------------------------------------------------------
 
 
-def test_write_bootstrap_creates_both_files(tmp_path: Path) -> None:
-    result = write_bootstrap(tmp_path, stub_name="bootstrap.sh", force=False)
+def test_write_bootstrap_creates_all_three_files(tmp_path: Path) -> None:
+    result = write_bootstrap(tmp_path, force=False)
     assert result.lib_path.name == "stackwiz-bootstrap.sh"
-    assert result.stub_path.name == "bootstrap.sh"
+    assert result.launcher_path.name == "bootstrap.sh"
+    assert result.config_path.name == "bootstrap.conf.sh"
     assert result.lib_path.exists()
-    assert result.stub_path.exists()
+    assert result.launcher_path.exists()
+    assert result.config_path.exists()
+    assert result.config_created is True
     assert "sw_bootstrap_main" in result.lib_path.read_text(encoding="utf-8")
-    assert "sw_bootstrap_main" in result.stub_path.read_text(encoding="utf-8")
+    # Launcher sources both config and library.
+    launcher = result.launcher_path.read_text(encoding="utf-8")
+    assert "bootstrap.conf.sh" in launcher
+    assert "stackwiz-bootstrap.sh" in launcher
+    assert "sw_bootstrap_main" in launcher
 
 
-def test_write_bootstrap_custom_stub_name(tmp_path: Path) -> None:
-    result = write_bootstrap(tmp_path, stub_name="install.sh", force=False)
-    assert result.stub_path.name == "install.sh"
+def test_write_bootstrap_custom_launcher_name(tmp_path: Path) -> None:
+    result = write_bootstrap(tmp_path, launcher_name="install.sh", force=False)
+    assert result.launcher_path.name == "install.sh"
 
 
 def test_write_bootstrap_refuses_overwrite(tmp_path: Path) -> None:
@@ -207,11 +215,23 @@ def test_write_bootstrap_refuses_overwrite(tmp_path: Path) -> None:
         write_bootstrap(tmp_path, force=False)
 
 
-def test_write_bootstrap_force_overwrites(tmp_path: Path) -> None:
+def test_write_bootstrap_force_overwrites_framework_files(tmp_path: Path) -> None:
     write_bootstrap(tmp_path, force=False)
-    (tmp_path / "stackwiz-bootstrap.sh").write_text("old", encoding="utf-8")
+    (tmp_path / "stackwiz-bootstrap.sh").write_text("old lib", encoding="utf-8")
+    (tmp_path / "bootstrap.sh").write_text("old launcher", encoding="utf-8")
     result = write_bootstrap(tmp_path, force=True)
     assert "sw_bootstrap_main" in result.lib_path.read_text(encoding="utf-8")
+    assert "sw_bootstrap_main" in result.launcher_path.read_text(encoding="utf-8")
+
+
+def test_write_bootstrap_force_preserves_config(tmp_path: Path) -> None:
+    """--force refreshes library+launcher but must NEVER touch bootstrap.conf.sh."""
+    write_bootstrap(tmp_path, force=False)
+    custom = "SW_EXTRA_ENV=(MY_CUSTOM_TOKEN)\n"
+    (tmp_path / "bootstrap.conf.sh").write_text(custom, encoding="utf-8")
+    result = write_bootstrap(tmp_path, force=True)
+    assert result.config_created is False
+    assert result.config_path.read_text(encoding="utf-8") == custom
 
 
 def test_read_bootstrap_library_text_contains_public_api() -> None:
@@ -220,6 +240,23 @@ def test_read_bootstrap_library_text_contains_public_api() -> None:
     assert "sw_bootstrap_ensure_docker" in text
 
 
-def test_bootstrap_stub_template_sources_lib() -> None:
-    assert "stackwiz-bootstrap.sh" in BOOTSTRAP_STUB_TEMPLATE
-    assert "sw_bootstrap_main" in BOOTSTRAP_STUB_TEMPLATE
+def test_read_bootstrap_launcher_text_sources_library() -> None:
+    text = read_bootstrap_launcher_text()
+    assert "stackwiz-bootstrap.sh" in text
+    assert "bootstrap.conf.sh" in text
+    assert "sw_bootstrap_main" in text
+
+
+def test_bootstrap_config_template_is_commented_out(tmp_path: Path) -> None:
+    """Default config template should leave all SW_* commented out so the
+    library defaults apply until the consumer explicitly overrides them."""
+    # Every SW_ assignment must be behind a leading `#`.
+    for line in BOOTSTRAP_CONFIG_TEMPLATE.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("SW_") and "=" in stripped:
+            raise AssertionError(f"uncommented default in config template: {line!r}")
+
+
+def test_bootstrap_config_template_sourced_by_launcher() -> None:
+    """Launcher and config-template filenames must agree."""
+    assert "bootstrap.conf.sh" in read_bootstrap_launcher_text()

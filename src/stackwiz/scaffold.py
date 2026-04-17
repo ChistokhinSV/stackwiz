@@ -49,43 +49,44 @@ class EnvScaffoldResult:
 @dataclass
 class BootstrapWriteResult:
     lib_path: Path
-    stub_path: Path
+    launcher_path: Path
+    config_path: Path
+    config_created: bool  # False if pre-existing config was preserved
 
 
-BOOTSTRAP_STUB_TEMPLATE = """#!/usr/bin/env bash
-# stackwiz consumer bootstrap stub.
+BOOTSTRAP_CONFIG_TEMPLATE = """#!/usr/bin/env bash
+# stackwiz consumer bootstrap config — the ONE editable piece.
 #
-# EDIT THIS FILE — per-project customization lives here. Tune the SW_*
-# arrays below. The paired stackwiz-bootstrap.sh library is
-# framework-managed; do not edit it. Refresh both via:
+# EDIT THIS FILE to customize the bootstrap for your project. Override only
+# what you need; every SW_* variable has a sensible default in the library.
+#
+# The paired bootstrap.sh launcher and stackwiz-bootstrap.sh library are
+# both framework-managed (do not edit). Refresh them together via:
 #     docker run --rm -v "$PWD:/out" ghcr.io/chistokhinsv/stackwiz:latest \\
 #         extract-bootstrap --output /out --force
-set -euo pipefail
+# which preserves this file.
 
 # Host packages to ensure before running. Drop jq/openssl/envsubst if unused.
-SW_REQUIRED_PKGS=(curl ca-certificates jq openssl gettext-base python3)
+# SW_REQUIRED_PKGS=(curl ca-certificates jq openssl gettext-base python3)
 
 # Extra env vars to pass through to the installer container (beyond the
 # canonical set: CONSUL_HTTP_ADDR, VAULT_ADDR/TOKEN, CF/AWS DNS, CERTBOT_EMAIL,
 # STACKWIZ_TLS_FORCE, STACKWIZ_HOST_STATE_DIR, STACKWIZ_HOST_MANIFEST_DIR).
-SW_EXTRA_ENV=(CONSUL_HTTP_TOKEN)
+# SW_EXTRA_ENV=(CONSUL_HTTP_TOKEN)
 
 # Files the installer may write as root; reclaimed after each writable run.
-SW_CHOWN_FILES=(.stackwiz.env .stackwiz.secrets.env .env)
+# SW_CHOWN_FILES=(.stackwiz.env .stackwiz.secrets.env .env)
 
 # Default manifest mount mode (0 = ro, 1 = rw). Write-commands below flip it
 # regardless. Set to 1 only if install-time secret redaction rewrites files.
-SW_WRITABLE_DEFAULT=0
+# SW_WRITABLE_DEFAULT=0
 
 # Args that force manifest RW / RO mount respectively.
-SW_WRITE_CMDS=(init-env)
-SW_READONLY_CMDS=(validate list info)
+# SW_WRITE_CMDS=(init-env)
+# SW_READONLY_CMDS=(validate list info)
 
 # Args that imply headless run (no -it).
-SW_HEADLESS_ARGS=(--auto --validate validate list info init-env)
-
-. "$(dirname "$0")/stackwiz-bootstrap.sh"
-sw_bootstrap_main "$@"
+# SW_HEADLESS_ARGS=(--auto --validate validate list info init-env)
 """
 
 
@@ -325,28 +326,64 @@ def read_bootstrap_library_text() -> str:
     )
 
 
+def read_bootstrap_launcher_text() -> str:
+    """Return the packaged ``bootstrap.sh`` launcher as text."""
+    return (
+        files("stackwiz")
+        .joinpath("share/bootstrap/bootstrap.sh")
+        .read_text(encoding="utf-8")
+    )
+
+
 def write_bootstrap(
     output_dir: Path,
-    stub_name: str = "bootstrap.sh",
+    launcher_name: str = "bootstrap.sh",
+    config_name: str = "bootstrap.conf.sh",
     force: bool = False,
 ) -> BootstrapWriteResult:
-    """Write the library + a starter stub into ``output_dir``.
+    """Write the bootstrap triplet into ``output_dir``.
 
-    Raises ``FileExistsError`` for any target that already exists when
-    ``force`` is False.
+    Three files are involved, with different overwrite semantics:
+      * ``stackwiz-bootstrap.sh`` — framework-managed library. Always
+        written; overwritten only with ``force=True``.
+      * ``<launcher_name>`` — framework-managed launcher. Same semantics.
+      * ``<config_name>`` — consumer-owned config template. Written only
+        if the file doesn't already exist. NEVER force-overwritten:
+        ``force=True`` only refreshes the framework-managed pair.
+
+    Raises ``FileExistsError`` for the library or launcher when they
+    already exist and ``force`` is False.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     lib_path = output_dir / "stackwiz-bootstrap.sh"
-    stub_path = output_dir / stub_name
+    launcher_path = output_dir / launcher_name
+    config_path = output_dir / config_name
+
     if not force:
-        for p in (lib_path, stub_path):
+        for p in (lib_path, launcher_path):
             if p.exists():
                 raise FileExistsError(p)
+
     lib_path.write_text(read_bootstrap_library_text(), encoding="utf-8")
-    stub_path.write_text(BOOTSTRAP_STUB_TEMPLATE, encoding="utf-8")
+    launcher_path.write_text(read_bootstrap_launcher_text(), encoding="utf-8")
+
+    config_created = False
+    if not config_path.exists():
+        config_path.write_text(BOOTSTRAP_CONFIG_TEMPLATE, encoding="utf-8")
+        config_created = True
+
     try:
         lib_path.chmod(0o755)
-        stub_path.chmod(0o755)
+        launcher_path.chmod(0o755)
+        # Config is sourced, not executed — 0644 is fine and avoids
+        # signaling it's directly runnable.
+        if config_created:
+            config_path.chmod(0o644)
     except OSError:
         pass
-    return BootstrapWriteResult(lib_path=lib_path, stub_path=stub_path)
+    return BootstrapWriteResult(
+        lib_path=lib_path,
+        launcher_path=launcher_path,
+        config_path=config_path,
+        config_created=config_created,
+    )

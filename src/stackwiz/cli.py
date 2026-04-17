@@ -378,41 +378,68 @@ def init_env(
 @main.command("extract-bootstrap")
 @click.option("--output", "output_dir", type=click.Path(file_okay=False, path_type=Path),
               default=None,
-              help="Destination directory (default: stdout for lib, stub printed after).")
-@click.option("--stub-name", "stub_name", default="bootstrap.sh", show_default=True,
-              help="Filename for the consumer stub when --output is set.")
+              help="Destination directory (default: stdout for library + templates).")
+@click.option("--launcher-name", "launcher_name", default="bootstrap.sh", show_default=True,
+              help="Filename for the framework-managed launcher when --output is set.")
+@click.option("--config-name", "config_name", default="bootstrap.conf.sh", show_default=True,
+              help="Filename for the consumer-owned config when --output is set.")
 @click.option("--force", is_flag=True, default=False,
-              help="Overwrite existing files under --output.")
-def extract_bootstrap(output_dir: Path | None, stub_name: str, force: bool) -> None:
-    """Emit the shared bootstrap library and a consumer stub.
+              help="Overwrite the framework-managed library + launcher. "
+                   "Does NOT overwrite the consumer config.")
+def extract_bootstrap(
+    output_dir: Path | None,
+    launcher_name: str,
+    config_name: str,
+    force: bool,
+) -> None:
+    """Emit the bootstrap triplet for a consumer.
 
-    With no --output: writes the library to stdout. Pipe to a file and add a
-    minimal stub that sources it.
+    Three files are written, with different overwrite semantics:
 
-    With --output DIR: writes `stackwiz-bootstrap.sh` and a starter stub
-    (named `bootstrap.sh` by default) into DIR. The stub is a working
-    consumer template — edit its SW_* arrays to match your project.
+    \b
+      stackwiz-bootstrap.sh   framework-managed library (do not edit)
+      bootstrap.sh            framework-managed launcher (do not edit)
+      bootstrap.conf.sh       consumer-owned config (EDIT ME)
+
+    Re-running --force refreshes the framework pair without touching
+    bootstrap.conf.sh, so vendored consumer repos can safely pull in
+    library/launcher fixes without losing per-project customization.
+
+    With no --output: writes the library to stdout and prints the
+    launcher + config templates to stderr for inspection.
     """
     from stackwiz.scaffold import (
-        BOOTSTRAP_STUB_TEMPLATE,
+        BOOTSTRAP_CONFIG_TEMPLATE,
+        read_bootstrap_launcher_text,
         read_bootstrap_library_text,
         write_bootstrap,
     )
 
     if output_dir is None:
         click.echo(read_bootstrap_library_text(), nl=False)
-        click.echo("\n# ---- sample stub ----", err=True)
-        click.echo(BOOTSTRAP_STUB_TEMPLATE, err=True, nl=False)
+        click.echo("\n# ---- launcher (bootstrap.sh) ----", err=True)
+        click.echo(read_bootstrap_launcher_text(), err=True, nl=False)
+        click.echo("\n# ---- config template (bootstrap.conf.sh) ----", err=True)
+        click.echo(BOOTSTRAP_CONFIG_TEMPLATE, err=True, nl=False)
         return
 
     try:
-        result = write_bootstrap(output_dir, stub_name=stub_name, force=force)
+        result = write_bootstrap(
+            output_dir,
+            launcher_name=launcher_name,
+            config_name=config_name,
+            force=force,
+        )
     except FileExistsError as exc:
         click.echo(f"error: {exc} exists (pass --force to overwrite)", err=True)
         sys.exit(2)
     click.echo(f"wrote {result.lib_path}")
-    click.echo(f"wrote {result.stub_path}")
-    click.echo("Edit the SW_* arrays in the stub, then: ./bootstrap.sh validate")
+    click.echo(f"wrote {result.launcher_path}")
+    if result.config_created:
+        click.echo(f"wrote {result.config_path}")
+    else:
+        click.echo(f"preserved existing {result.config_path}")
+    click.echo("Edit the SW_* arrays in bootstrap.conf.sh, then: ./bootstrap.sh validate")
 
 
 @main.command("vault-shred-init")
