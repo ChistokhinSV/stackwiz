@@ -16,6 +16,23 @@ log = logging.getLogger("stackwiz.vault")
 KV_MOUNT = "stackwiz"
 UNSEAL_SHARES = 5
 UNSEAL_THRESHOLD = 3
+DEFAULT_BACKEND_TIMEOUT = 30.0
+
+
+def resolve_backend_timeout() -> float:
+    """Read ``STACKWIZ_BACKEND_TIMEOUT`` (seconds) with a sane default.
+
+    A hung backend will wedge install forever without this. Shared by both
+    the Vault and Consul clients so one knob tunes both.
+    """
+    raw = os.environ.get("STACKWIZ_BACKEND_TIMEOUT", "").strip()
+    if not raw:
+        return DEFAULT_BACKEND_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_BACKEND_TIMEOUT
+    return value if value > 0 else DEFAULT_BACKEND_TIMEOUT
 
 
 def resolve_verify(explicit: bool | str | None = None) -> bool | str:
@@ -80,6 +97,7 @@ class VaultClient:
             url=self.address,
             token=self._token,
             verify=self._verify,
+            timeout=resolve_backend_timeout(),
         )
 
     # --- health / auth ----------------------------------------------------------

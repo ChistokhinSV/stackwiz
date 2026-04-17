@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 import consul
 
 from stackwiz.manifest import Component, ConsulService
+from stackwiz.vault_client import resolve_backend_timeout
 
 
 @dataclass
@@ -29,6 +30,7 @@ class ConsulClient:
             port=parsed.port or 8500,
             scheme=parsed.scheme or "http",
             token=token,
+            timeout=resolve_backend_timeout(),
         )
 
     @property

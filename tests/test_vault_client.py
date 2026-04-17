@@ -10,7 +10,12 @@ from unittest.mock import MagicMock, patch
 import hvac
 import pytest
 
-from stackwiz.vault_client import VaultClient, resolve_verify
+from stackwiz.vault_client import (
+    DEFAULT_BACKEND_TIMEOUT,
+    VaultClient,
+    resolve_backend_timeout,
+    resolve_verify,
+)
 
 
 @pytest.fixture
@@ -125,3 +130,34 @@ def test_vault_client_ctor_honors_cacert_env(monkeypatch: pytest.MonkeyPatch) ->
         VaultClient("https://vault.example", token="t")
         kwargs = hvac_cls.call_args.kwargs
         assert kwargs["verify"] == "/etc/ssl/myca.pem"
+
+
+# --- resolve_backend_timeout ------------------------------------------------
+
+
+def test_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("STACKWIZ_BACKEND_TIMEOUT", raising=False)
+    assert resolve_backend_timeout() == DEFAULT_BACKEND_TIMEOUT
+
+
+def test_timeout_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STACKWIZ_BACKEND_TIMEOUT", "5.5")
+    assert resolve_backend_timeout() == 5.5
+
+
+@pytest.mark.parametrize("bad", ["not-a-number", "0", "-1", ""])
+def test_timeout_invalid_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    monkeypatch.setenv("STACKWIZ_BACKEND_TIMEOUT", bad)
+    assert resolve_backend_timeout() == DEFAULT_BACKEND_TIMEOUT
+
+
+def test_vault_client_passes_timeout_to_hvac(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STACKWIZ_BACKEND_TIMEOUT", "7")
+    with patch("stackwiz.vault_client.hvac.Client") as hvac_cls:
+        hvac_cls.return_value = MagicMock()
+        VaultClient("https://vault.example", token="t")
+        assert hvac_cls.call_args.kwargs["timeout"] == 7.0
