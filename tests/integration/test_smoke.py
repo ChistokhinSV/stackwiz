@@ -24,6 +24,9 @@ def test_install_is_idempotent_and_uninstall_cleans_up(
     it_env: dict[str, str],
     tmp_path: Path,
 ) -> None:
+    # run_headless takes the state_dir it is handed as-is. Namespacing by
+    # manifest.name is a `wizinstall` CLI concern (_resolve_state_dir) —
+    # the test exercises run_headless directly, so we pass a per-test dir.
     state_dir = tmp_path / "state"
     manifest = load_manifest(MANIFEST_FILE)
 
@@ -37,11 +40,9 @@ def test_install_is_idempotent_and_uninstall_cleans_up(
     )
     assert rc == 0, "first install should succeed"
 
-    # The state file lands under <state>/<manifest.name>/installed.yaml per
-    # _resolve_state_dir. The smoke manifest has name=stackwiz-it-minimal.
-    installed_yaml = state_dir / manifest.name / "installed.yaml"
+    installed_yaml = state_dir / "installed.yaml"
     assert installed_yaml.exists(), "state file must be written after install"
-    state = State(state_dir / manifest.name)
+    state = State(state_dir)
     assert "hello" in state.installed()
 
     # Consul should have the service.
@@ -62,7 +63,6 @@ def test_install_is_idempotent_and_uninstall_cleans_up(
     assert r.json()["data"]["data"]["smoke"] == "ok"
 
     # 2. Re-run. Nothing changed → NOOP. Verified via state unchanged.
-    before_mtime = installed_yaml.stat().st_mtime
     rc = run_headless(
         manifest=manifest,
         state_dir=state_dir,
@@ -70,9 +70,7 @@ def test_install_is_idempotent_and_uninstall_cleans_up(
         mode="install",
     )
     assert rc == 0, "re-run should succeed"
-    # state file may have been rewritten with the same content, but the
-    # component version / hash should be identical to the first run.
-    state = State(state_dir / manifest.name)
+    state = State(state_dir)
     entry = state.installed()["hello"]
     assert entry.version == "0.0.1"
 
@@ -84,13 +82,10 @@ def test_install_is_idempotent_and_uninstall_cleans_up(
         mode="uninstall",
     )
     assert rc == 0, "uninstall should succeed"
-    state = State(state_dir / manifest.name)
+    state = State(state_dir)
     assert "hello" not in state.installed(), (
         f"component 'hello' should be removed from state, got {state.installed()}"
     )
-    # Mention: before_mtime retained so regressions that touch the file on
-    # re-run surface as an assertion failure if we later strengthen this.
-    del before_mtime
 
 
 @pytest.mark.integration

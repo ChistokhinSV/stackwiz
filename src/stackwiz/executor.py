@@ -148,11 +148,21 @@ class Executor:
             rc = await proc.wait()
             yield ("exit", str(rc))
         except asyncio.CancelledError:
-            proc.terminate()
+            # Process may already be dead (normal exit followed by the
+            # consumer closing the generator on gc) — ProcessLookupError
+            # from terminate/kill just means "already exited", which is
+            # the desired end state, so swallow it.
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except TimeoutError:
-                proc.kill()
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
                 await proc.wait()
             raise
         finally:
