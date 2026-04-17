@@ -173,8 +173,14 @@ stackwiz_nginx_init() {
     _stackwiz_nginx_ensure_container
     _stackwiz_nginx_unlock
 
-    # Make tls dir readable by nginx-unprivileged (uid 101).
-    chmod -R go+rX "${STACKWIZ_NGINX_DIR}/conf.d" "${STACKWIZ_NGINX_DIR}/tls" 2>/dev/null || true
+    # Make configs and tls dir traversable by nginx-unprivileged (uid 101).
+    # Certs are world-readable; private keys stay 0600 owned by uid 101 (see
+    # stackwiz_nginx_add_cert). Recursive go+rX on tls/ is intentionally avoided
+    # to prevent re-exposing keys.
+    chmod -R go+rX "${STACKWIZ_NGINX_DIR}/conf.d" 2>/dev/null || true
+    chmod go+rX "${STACKWIZ_NGINX_DIR}/tls" 2>/dev/null || true
+    find "${STACKWIZ_NGINX_DIR}/tls" -maxdepth 1 -type f -name '*.crt' \
+        -exec chmod 0644 {} + 2>/dev/null || true
 }
 
 stackwiz_nginx_add_conf() {
@@ -204,7 +210,12 @@ stackwiz_nginx_add_cert() {
     local cert="${2:?cert_path required}"
     local key="${3:?key_path required}"
     install -m 0644 "${cert}" "${STACKWIZ_NGINX_DIR}/tls/${host}.crt"
-    install -m 0644 "${key}"  "${STACKWIZ_NGINX_DIR}/tls/${host}.key"
+    install -m 0600 "${key}"  "${STACKWIZ_NGINX_DIR}/tls/${host}.key"
+    # nginx-unprivileged (image) runs as uid 101; the read-only bind mount
+    # preserves host ownership, so the key must be owned by 101 for nginx to
+    # read it. chown is best-effort: if running in a rootless context it may
+    # fail, in which case the operator must adjust manually.
+    chown 101:101 "${STACKWIZ_NGINX_DIR}/tls/${host}.key" 2>/dev/null || true
 }
 
 stackwiz_nginx_add_proxy() {

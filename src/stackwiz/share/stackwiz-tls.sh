@@ -228,8 +228,9 @@ _stackwiz_tls_install_deploy_hook() {
 NGINX_TLS="/opt/stackwiz/nginx/tls"
 [ -d "$NGINX_TLS" ] || exit 0
 HOST=$(basename "$RENEWED_LINEAGE")
-cp "$RENEWED_LINEAGE/fullchain.pem" "$NGINX_TLS/${HOST}.crt" 2>/dev/null || true
-cp "$RENEWED_LINEAGE/privkey.pem"   "$NGINX_TLS/${HOST}.key" 2>/dev/null || true
+install -m 0644 "$RENEWED_LINEAGE/fullchain.pem" "$NGINX_TLS/${HOST}.crt" 2>/dev/null || true
+install -m 0600 "$RENEWED_LINEAGE/privkey.pem"   "$NGINX_TLS/${HOST}.key" 2>/dev/null || true
+chown 101:101 "$NGINX_TLS/${HOST}.key" 2>/dev/null || true
 docker exec stackwiz-nginx nginx -s reload 2>/dev/null || true
 HOOK
     chmod 755 "$hook_dir/stackwiz-nginx-reload.sh"
