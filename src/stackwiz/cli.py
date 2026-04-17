@@ -333,211 +333,31 @@ def init_env(
     `wizinstall run` — the TUI pre-fills every field from the file, and
     `run --auto` uses it as the source of truth for required values.
     """
+    from stackwiz.scaffold import scaffold_env_files
+
     manifest = _load(manifest_path)
     manifest_dir = manifest_path.parent.resolve()
     target = (output_path or manifest_dir / ".stackwiz.env").resolve()
-
-    if target.exists() and not force:
+    try:
+        result = scaffold_env_files(manifest, manifest_dir, target, force)
+    except FileExistsError as exc:
         click.echo(
-            f"error: {target} already exists. Pass --force to overwrite.",
+            f"error: {exc} already exists. Pass --force to overwrite.",
             err=True,
         )
         sys.exit(2)
 
-    from stackwiz.config_overrides import effective_config
-    existing = _try_read_existing(target)
-    resolved, domain = effective_config(manifest, existing, None)
-
-    header = (
-        f"# stackwiz consumer config overrides for "
-        f"{manifest.display_name} v{manifest.version}"
-    )
-    lines: list[str] = []
-    lines.append(header)
-    lines.append("#")
-    lines.append("# EDIT ONLY WHAT YOU NEED TO OVERRIDE.")
-    lines.append("# Fields below are commented out — uncomment to override the manifest default.")
-    lines.append("# Change `domain:` and every ${domain}-derived field auto-updates at run time.")
-    lines.append("# Precedence (highest wins):")
-    lines.append("#   <state_dir>/config.yaml > this file > manifest `default:` fields")
-    lines.append("")
-    lines.append("# ---- Deployment domain ----")
-    lines.append("# Drives Consul/Vault service discovery (consul.<domain> / vault.<domain>)")
-    lines.append("# and is referenced via ${domain} by other fields in the manifest.")
-    lines.append(_yaml_line("domain", domain))
-    lines.append("")
-    lines.append("# ---- Component configuration ----")
-    lines.append("# Values shown in comments are what the current `domain:` resolves to —")
-    lines.append("# they're HINTS, not defaults baked into this file. Uncomment a line to")
-    lines.append("# force that specific value regardless of the cascade.")
-    lines.append("")
-    for field in manifest.config:
-        if field.help:
-            lines.append(f"# {field.label}: {field.help}")
-        else:
-            lines.append(f"# {field.label}")
-        if field.type == "select" and field.choices:
-            lines.append(f"#   choices: {', '.join(field.choices)}")
-        if field.required:
-            lines.append("#   required")
-        val = resolved.get(field.id, field.default)
-        yaml_line = _yaml_line(field.id, val)
-        # If the user explicitly set this field in the current .stackwiz.env,
-        # preserve it as an uncommented override. Otherwise emit a commented
-        # hint so the cascade stays in effect.
-        if field.id in existing and field.id != "domain":
-            lines.append(yaml_line)
-        else:
-            lines.append(f"# {yaml_line}")
-        lines.append("")
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("\n".join(lines), encoding="utf-8")
-    try:
-        target.chmod(0o600)
-    except OSError:
-        pass
-    click.echo(f"wrote {target}")
-
-    from stackwiz.secrets_env import (
-        SECRETS_ENV_FILENAME,
-        load_secrets_env,
-        user_secret_specs,
-        write_secrets_env_scaffold,
-    )
-    user_specs = user_secret_specs(manifest)
-    if user_specs:
-        secrets_target = (manifest_dir / SECRETS_ENV_FILENAME).resolve()
-        existing_secrets = load_secrets_env(secrets_target)
-        write_secrets_env_scaffold(secrets_target, manifest, existing_secrets, user_specs)
-        click.echo(f"wrote {secrets_target}")
-
-    # Generate .env (shell-style KEY=VALUE) for bootstrap credentials.
-    # Merges built-in TLS placeholders with project's .env.template (if any).
-    dot_env = manifest_dir / ".env"
-    env_template = manifest_dir / ".env.template"
-    if (env_template.exists() or {f.id for f in manifest.config} & {"tls_mode", "certbot_email"}):
-        if not dot_env.exists() or force:
-            _write_dot_env(dot_env, env_template)
-            click.echo(f"wrote {dot_env}")
-
-    # Idempotently ensure all env files are gitignored.
-    entries = [".stackwiz.env", SECRETS_ENV_FILENAME, ".env"]
-    added = _ensure_gitignore_entries(manifest_dir / ".gitignore", entries)
-    if added:
+    click.echo(f"wrote {result.env_file}")
+    if result.secrets_file is not None:
+        click.echo(f"wrote {result.secrets_file}")
+    if result.dot_env_file is not None:
+        click.echo(f"wrote {result.dot_env_file}")
+    if result.gitignore_added:
         click.echo(
-            f"updated {manifest_dir / '.gitignore'}: added {', '.join(added)}"
+            f"updated {manifest_dir / '.gitignore'}: added "
+            f"{', '.join(result.gitignore_added)}"
         )
-
     click.echo("Edit it and re-run `wizinstall run` to pick up the overrides.")
-
-
-def _ensure_gitignore_entries(path: Path, entries: list[str]) -> list[str]:
-    """Append missing `entries` to the gitignore at `path`. Returns what was added.
-
-    Creates the file if absent. Idempotent — existing entries (any form of
-    leading `./` or trailing whitespace) are recognized and skipped.
-    """
-    existing_lines: list[str] = []
-    existing_set: set[str] = set()
-    if path.exists():
-        existing_lines = path.read_text(encoding="utf-8").splitlines()
-        for line in existing_lines:
-            stripped = line.strip()
-            if stripped.startswith("./"):
-                stripped = stripped[2:]
-            elif stripped.startswith("/"):
-                stripped = stripped[1:]
-            if stripped:
-                existing_set.add(stripped)
-    missing = [e for e in entries if e not in existing_set]
-    if not missing:
-        return []
-    out = list(existing_lines)
-    if out and out[-1] != "":
-        out.append("")
-    out.extend(missing)
-    out.append("")
-    path.write_text("\n".join(out), encoding="utf-8")
-    return missing
-
-
-def _try_read_existing(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    try:
-        import yaml
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        return data if isinstance(data, dict) else {}
-    except Exception:  # noqa: BLE001
-        return {}
-
-
-def _write_dot_env(path: Path, template: Path | None = None) -> None:
-    """Write a .env scaffold for bootstrap.sh.
-
-    Starts with a built-in TLS/DNS placeholder block, then appends the
-    project's ``.env.template`` (if provided) with all ``KEY=VALUE`` lines
-    commented out so the user can selectively uncomment what they need.
-
-    bootstrap.sh sources this file so the operator fills it once and the
-    credentials persist across runs without exporting in their shell.
-    """
-    lines = [
-        "# stackwiz bootstrap credentials",
-        "# Fill the credentials you need; bootstrap.sh sources this file automatically.",
-        "# This file is gitignored -- it contains secrets.",
-        "",
-        "# ---- TLS / Let's Encrypt DNS challenge credentials ----",
-        "# Uncomment ONE provider block. If none are set and tls_mode is \"auto\",",
-        "# the TLS helper falls back to self-signed certificates.",
-        "",
-        "# Cloudflare DNS-01 (fastest, recommended):",
-        "#CF_DNS_API_TOKEN=",
-        "",
-        "# AWS Route53 DNS-01:",
-        "#AWS_DNS_ACCESS_KEY_ID=",
-        "#AWS_DNS_SECRET_ACCESS_KEY=",
-    ]
-
-    if template is not None and template.exists():
-        lines.append("")
-        lines.append(f"# ---- From {template.name} ----")
-        for raw in template.read_text(encoding="utf-8").splitlines():
-            stripped = raw.strip()
-            # Preserve blank lines and existing comments as-is
-            if not stripped or stripped.startswith("#"):
-                lines.append(raw)
-            else:
-                # Comment out KEY=VALUE lines so user opts in explicitly
-                lines.append(f"#{raw}")
-        # Ensure trailing newline
-        if lines and lines[-1] != "":
-            lines.append("")
-
-    content = "\n".join(lines)
-    if not content.endswith("\n"):
-        content += "\n"
-    path.write_text(content, encoding="utf-8")
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-
-
-def _yaml_line(key: str, value: object) -> str:
-    """Emit `key: value` with appropriate YAML quoting."""
-    if value is None:
-        return f"{key}: null"
-    if isinstance(value, bool):
-        return f"{key}: {'true' if value else 'false'}"
-    if isinstance(value, (int, float)):
-        return f"{key}: {value}"
-    s = str(value)
-    # Always quote strings for safety (avoids YAML parsing surprises for
-    # values that look numeric, like IP addresses).
-    escaped = s.replace('"', '\\"')
-    return f'{key}: "{escaped}"'
 
 
 @main.command("extract-bootstrap")
@@ -558,62 +378,25 @@ def extract_bootstrap(output_dir: Path | None, stub_name: str, force: bool) -> N
     (named `bootstrap.sh` by default) into DIR. The stub is a working
     consumer template — edit its SW_* arrays to match your project.
     """
-    from importlib.resources import files
-    lib_src = files("stackwiz").joinpath("share/bootstrap/stackwiz-bootstrap.sh")
-    lib_text = lib_src.read_text(encoding="utf-8")
-
-    stub_text = """#!/usr/bin/env bash
-# stackwiz consumer bootstrap stub. Edit SW_* arrays to match your project.
-set -euo pipefail
-
-# Host packages to ensure before running. Drop jq/openssl/envsubst if unused.
-SW_REQUIRED_PKGS=(curl ca-certificates jq openssl gettext-base python3)
-
-# Extra env vars to pass through to the installer container (beyond the
-# canonical set: CONSUL_HTTP_ADDR, VAULT_ADDR/TOKEN, CF/AWS DNS, CERTBOT_EMAIL,
-# STACKWIZ_TLS_FORCE, STACKWIZ_HOST_STATE_DIR, STACKWIZ_HOST_MANIFEST_DIR).
-SW_EXTRA_ENV=(CONSUL_HTTP_TOKEN)
-
-# Files the installer may write as root; reclaimed after each writable run.
-SW_CHOWN_FILES=(.stackwiz.env .stackwiz.secrets.env .env)
-
-# Default manifest mount mode (0 = ro, 1 = rw). Write-commands below flip it
-# regardless. Set to 1 only if install-time secret redaction rewrites files.
-SW_WRITABLE_DEFAULT=0
-
-# Args that force manifest RW / RO mount respectively.
-SW_WRITE_CMDS=(init-env)
-SW_READONLY_CMDS=(validate list info)
-
-# Args that imply headless run (no -it).
-SW_HEADLESS_ARGS=(--auto --validate validate list info init-env)
-
-. "$(dirname "$0")/stackwiz-bootstrap.sh"
-sw_bootstrap_main "$@"
-"""
+    from stackwiz.scaffold import (
+        BOOTSTRAP_STUB_TEMPLATE,
+        read_bootstrap_library_text,
+        write_bootstrap,
+    )
 
     if output_dir is None:
-        click.echo(lib_text, nl=False)
+        click.echo(read_bootstrap_library_text(), nl=False)
         click.echo("\n# ---- sample stub ----", err=True)
-        click.echo(stub_text, err=True, nl=False)
+        click.echo(BOOTSTRAP_STUB_TEMPLATE, err=True, nl=False)
         return
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    lib_path = output_dir / "stackwiz-bootstrap.sh"
-    stub_path = output_dir / stub_name
-    for p in (lib_path, stub_path):
-        if p.exists() and not force:
-            click.echo(f"error: {p} exists (pass --force to overwrite)", err=True)
-            sys.exit(2)
-    lib_path.write_text(lib_text, encoding="utf-8")
-    stub_path.write_text(stub_text, encoding="utf-8")
     try:
-        lib_path.chmod(0o755)
-        stub_path.chmod(0o755)
-    except OSError:
-        pass
-    click.echo(f"wrote {lib_path}")
-    click.echo(f"wrote {stub_path}")
+        result = write_bootstrap(output_dir, stub_name=stub_name, force=force)
+    except FileExistsError as exc:
+        click.echo(f"error: {exc} exists (pass --force to overwrite)", err=True)
+        sys.exit(2)
+    click.echo(f"wrote {result.lib_path}")
+    click.echo(f"wrote {result.stub_path}")
     click.echo("Edit the SW_* arrays in the stub, then: ./bootstrap.sh validate")
 
 
