@@ -117,6 +117,15 @@ class Engine:
         # vault-install step (if any) will refresh via _adopt_vault_after_install.
         materialized: dict[str, MaterializedSecret] = {}
         if self.vault is not None:
+            # ensure_kv_mount is idempotent — re-asserting on every install
+            # costs nothing on a fully-provisioned Vault and fixes the case
+            # where an operator brought Vault up manually (or a previous
+            # install failed between init and mount creation), leaving it
+            # reachable but without the `stackwiz` KV v2 mount.
+            try:
+                self.vault.ensure_kv_mount()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("vault kv mount ensure failed: %s", exc)
             self._upload_user_secrets()
             materialized = materialize_secrets(self.manifest, self.vault)
         result = EngineResult(secrets=materialized)
