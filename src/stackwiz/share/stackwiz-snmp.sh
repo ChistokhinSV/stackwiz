@@ -170,7 +170,11 @@ stackwiz_snmp_install() {
     cat > /etc/snmp/snmpd.conf <<EOF
 # stackwiz-managed — do not edit manually.
 # SNMPv3 only (authPriv), no v1/v2c community strings.
-agentAddress udp:161
+#
+# Listen on UDP:161 (the real SNMP transport used by monitoring systems)
+# AND TCP:161 (so Consul's tcp health check can probe liveness — Consul
+# has no native UDP check). net-snmp binds both from a single agentd.
+agentAddress udp:161,tcp:161
 sysLocation  stackwiz-managed
 sysContact   admin@localhost
 

@@ -74,6 +74,9 @@ class ConsulClient:
                     _rewrite(svc.check.http),
                     interval=svc.check.interval,
                     timeout=svc.check.timeout,
+                    tls_skip_verify=(
+                        svc.check.tls_skip_verify or None
+                    ),
                 )
             elif svc.check.tcp:
                 tcp = _rewrite(svc.check.tcp)

@@ -50,11 +50,19 @@ class ConsulServiceCheck(_LeafModel):
     tcp: str | None = None
     interval: str = "30s"
     timeout: str = "5s"
+    # HTTP-only: skip TLS cert verification. Required when the target cert's
+    # SAN doesn't match the host the check is made from — e.g. a vault cert
+    # issued for "vault.example.com" but the consul agent reaches it via the
+    # docker-network hostname "vault". Consul's TLSSkipVerify is the native
+    # way to opt out.
+    tls_skip_verify: bool = False
 
     @model_validator(mode="after")
     def _one_probe(self) -> ConsulServiceCheck:
         if not self.http and not self.tcp:
             raise ValueError("consul check needs either http or tcp")
+        if self.tls_skip_verify and not self.http:
+            raise ValueError("tls_skip_verify is only meaningful with http checks")
         return self
 
 
