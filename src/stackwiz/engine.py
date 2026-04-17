@@ -512,6 +512,21 @@ class Engine:
                         component.id, svc.name, exc,
                     )
                     continue
+            else:
+                # Consul's agent keeps the existing check goroutine running
+                # across a plain re-register of the same service id — the
+                # registration is replaced but the check config isn't. A
+                # deregister first kills the old goroutine so the fresh
+                # register actually applies any check-config changes
+                # (tls_skip_verify, interval, URL). Best-effort; if the
+                # service wasn't there we don't care.
+                try:
+                    self.consul.deregister_service(component, svc)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug(
+                        "%s: pre-register deregister %s: %s",
+                        component.id, svc.name, exc,
+                    )
             try:
                 self.consul.register_service(
                     component, svc, node_address=self._node_ip,
