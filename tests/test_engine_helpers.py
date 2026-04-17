@@ -134,6 +134,21 @@ def test_register_services_swallows_discover_errors(engine: Engine) -> None:
     fake.register_service.assert_not_called()
 
 
+def test_register_services_force_skips_discover_and_always_registers(
+    engine: Engine,
+) -> None:
+    """force=True must re-register even when the service is already in the
+    catalog — that's how a manifest check-config edit lands on re-run."""
+    component = engine.manifest.topo_order()[0]  # k3s
+    fake = MagicMock()
+    fake.discover.return_value = object()  # already registered
+    engine.consul = fake
+    engine._node_ip = "10.0.0.5"
+    engine._register_component_services(component, force=True)
+    fake.discover.assert_not_called()  # skipped entirely under force
+    fake.register_service.assert_called_once()
+
+
 # --- _catchup_service_policies ---------------------------------------------
 
 

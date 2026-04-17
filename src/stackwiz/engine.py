@@ -480,24 +480,38 @@ class Engine:
             )
         )
 
-    def _register_component_services(self, component: Component) -> None:
-        """Register all of a component's Consul services, skipping existing.
+    def _register_component_services(
+        self, component: Component, force: bool = False,
+    ) -> None:
+        """Register all of a component's Consul services.
 
-        Idempotent: probes via ``discover()`` first; on existing entries the
-        registration is a no-op. All errors are warn-logged, never raised —
-        Consul registration is best-effort forensic metadata, not a gate.
+        When ``force=False`` (default, catchup path): probe via ``discover()``
+        first and skip services already in the catalog — avoids re-registering
+        every NOOP component on every run.
+
+        When ``force=True`` (post-publish path): always re-register, even when
+        the service already exists. Consul's agent register is idempotent BUT
+        it is also the only way a check-config change (tls_skip_verify,
+        interval, health URL) reaches the agent. Without force, operators
+        running ``wizinstall run --force`` to pick up a manifest edit would
+        see the edit fall on deaf ears for services already registered.
+
+        All errors are warn-logged, never raised — Consul registration is
+        best-effort forensic metadata, not a gate.
         """
         if self.consul is None:
             return
         for svc in component.all_consul_services():
-            try:
-                if self.consul.discover(svc) is not None:
+            if not force:
+                try:
+                    if self.consul.discover(svc) is not None:
+                        continue
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "%s: discover %s failed: %s",
+                        component.id, svc.name, exc,
+                    )
                     continue
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "%s: discover %s failed: %s", component.id, svc.name, exc,
-                )
-                continue
             try:
                 self.consul.register_service(
                     component, svc, node_address=self._node_ip,
@@ -640,7 +654,10 @@ class Engine:
         services, KV config, and apply the runtime read-only Vault policy."""
         prefix = self.manifest.consul.service_prefix
         if self.consul is not None:
-            self._register_component_services(component)
+            # force=True so a manifest check-config edit (e.g.
+            # tls_skip_verify) lands on the next install, not the next
+            # fresh-deploy.
+            self._register_component_services(component, force=True)
             for key, value in self._kv_payload(config_values, component).items():
                 try:
                     self.consul.kv_put(f"{prefix}/config/{key}", str(value))
