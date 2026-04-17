@@ -1,6 +1,7 @@
 """Consul wrapper: service register/deregister + non-secret KV config."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -8,6 +9,8 @@ import consul
 
 from stackwiz.manifest import Component, ConsulService
 from stackwiz.vault_client import resolve_backend_timeout
+
+log = logging.getLogger("stackwiz.consul")
 
 
 @dataclass
@@ -42,7 +45,8 @@ class ConsulClient:
     def leader(self) -> str | None:
         try:
             return self._client.status.leader()
-        except Exception:  # noqa: BLE001 — connection errors become "no leader"
+        except Exception as exc:  # noqa: BLE001 — connection errors → "no leader"
+            log.debug("consul leader lookup failed: %s", exc)
             return None
 
     # --- service registration ---------------------------------------------------
@@ -106,8 +110,11 @@ class ConsulClient:
                 self._client.agent.service.deregister(
                     f"{svc.name}-{component.id}", token=self._token,
                 )
-            except Exception:  # noqa: BLE001 — idempotent teardown
-                pass
+            except Exception as exc:  # noqa: BLE001 — idempotent teardown
+                log.debug(
+                    "consul deregister %s-%s: %s",
+                    svc.name, component.id, exc,
+                )
 
     def discover(self, service: ConsulService | str) -> CatalogEntry | None:
         name = service.name if isinstance(service, ConsulService) else service

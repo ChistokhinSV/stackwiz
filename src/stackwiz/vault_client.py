@@ -235,6 +235,28 @@ class VaultClient:
         except hvac.exceptions.VaultError:
             pass
 
+    def apply_shared_read_policy(self, mount: str = KV_MOUNT) -> str:
+        """Create or update the ``stackwiz-shared-read`` policy.
+
+        Grants read-only access to ``{mount}/data/shared/*``. Intended for
+        components whose runtime needs to read cross-component secrets
+        (e.g. the SSH pubkey at ``shared/kb_sync_ssh_pubkey``). Operators
+        bind it to a component's AppRole or a dedicated token as needed.
+
+        Separate from the per-component runtime policy so there's exactly
+        one choke point for "who can read shared secrets" — documented in
+        CONSUMER.md's Secret Lifecycle section.
+        """
+        name = "stackwiz-shared-read"
+        hcl = (
+            f'path "{mount}/data/shared/*" '
+            f'{{ capabilities = ["read"] }}\n'
+            f'path "{mount}/metadata/shared/*" '
+            f'{{ capabilities = ["list", "read"] }}\n'
+        )
+        self._client.sys.create_or_update_policy(name=name, policy=hcl)
+        return name
+
     # --- install-time scoped tokens --------------------------------------------
 
     def create_install_policy(

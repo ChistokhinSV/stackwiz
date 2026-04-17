@@ -159,6 +159,15 @@ class Executor:
             for t in pumps:
                 if not t.done():
                     t.cancel()
+            # Await and collect results so unexpected pump-internal errors
+            # (UnicodeDecodeError, OSError on closed pipes, etc.) surface in
+            # install.log instead of being silently dropped.
+            results = await asyncio.gather(*pumps, return_exceptions=True)
+            for r in results:
+                if isinstance(r, BaseException) and not isinstance(
+                    r, asyncio.CancelledError,
+                ):
+                    _log.warning("executor pump error: %s", r)
 
     async def run_collect(
         self,

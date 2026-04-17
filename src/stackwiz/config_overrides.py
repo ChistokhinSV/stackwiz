@@ -25,6 +25,7 @@ and have everything downstream update from a single `domain:` override in
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ import yaml
 
 from stackwiz.manifest import Manifest
 
+log = logging.getLogger("stackwiz.config")
 _PLACEHOLDER = re.compile(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
 
@@ -41,7 +43,8 @@ def _load_env_file(env_file: Path | None) -> dict[str, Any]:
         return {}
     try:
         data = yaml.safe_load(env_file.read_text(encoding="utf-8")) or {}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not parse %s as YAML, ignoring: %s", env_file, exc)
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -88,10 +91,7 @@ def _resolve_node_ip(domain: str) -> str:
     Prefers ``hostname -I`` (always returns the real LAN IP) over DNS,
     which may return a CDN/proxy address (e.g. Cloudflare).
     """
-    import logging
     import subprocess
-
-    log = logging.getLogger("stackwiz.config")
 
     # Prefer hostname -I — always gives the real local IP.
     try:
@@ -101,10 +101,10 @@ def _resolve_node_ip(domain: str) -> str:
         if result.returncode == 0:
             ip = result.stdout.strip().split()[0]
             if ip:
-                log.info("node_ip: resolved via hostname -I → %s", ip)
+                log.info("node_ip: resolved via hostname -I -> %s", ip)
                 return ip
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        log.debug("hostname -I failed: %s", exc)
 
     # Fallback: DNS resolution of the domain.
     try:
@@ -112,10 +112,10 @@ def _resolve_node_ip(domain: str) -> str:
         answers = dns.resolver.resolve(domain, "A", lifetime=3.0)
         for rdata in answers:
             ip = str(rdata)
-            log.info("node_ip: resolved %s → %s (DNS)", domain, ip)
+            log.info("node_ip: resolved %s -> %s (DNS)", domain, ip)
             return ip
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        log.debug("DNS resolve %s failed: %s", domain, exc)
 
     log.warning("node_ip: auto-detection failed for domain %s", domain)
     return ""

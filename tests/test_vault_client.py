@@ -91,6 +91,18 @@ def test_revoke_install_policy_deletes_by_derived_name(client: VaultClient) -> N
     client._client.sys.delete_policy.assert_called_once_with(name="081-grafana-install")
 
 
+def test_apply_shared_read_policy_hcl(client: VaultClient) -> None:
+    name = client.apply_shared_read_policy()
+    assert name == "stackwiz-shared-read"
+    kwargs = client._client.sys.create_or_update_policy.call_args.kwargs
+    assert kwargs["name"] == "stackwiz-shared-read"
+    hcl = kwargs["policy"]
+    assert 'path "stackwiz/data/shared/*"' in hcl
+    assert 'capabilities = ["read"]' in hcl
+    # No write capabilities anywhere — defense against accidental elevation.
+    assert "create" not in hcl and "update" not in hcl and "delete" not in hcl
+
+
 # --- resolve_verify ---------------------------------------------------------
 
 

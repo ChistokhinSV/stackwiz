@@ -12,6 +12,7 @@ pointer back to this file and the target Vault path.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import yaml
@@ -36,7 +37,10 @@ def load_secrets_env(path: Path) -> dict[str, str]:
         return {}
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("stackwiz.secrets_env").warning(
+            "could not parse %s as YAML, ignoring: %s", path, exc,
+        )
         return {}
     if not isinstance(data, dict):
         return {}
