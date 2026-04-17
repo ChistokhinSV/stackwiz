@@ -1,7 +1,12 @@
 """Non-interactive (headless) install mode.
 
-Runs the same engine as the TUI but prints progress to stdout. Suitable for
-CI provisioning, Vagrant smoke tests, and anywhere you can't drive a terminal.
+Runs the same engine as the TUI but routes progress through the stackwiz
+logger so install.log captures every line. A dedicated stdout/stderr
+handler is attached to the ``stackwiz.headless`` logger so operators also
+see status + per-step events on their terminal.
+
+Suitable for CI provisioning, Vagrant smoke tests, and anywhere you can't
+drive a terminal.
 """
 from __future__ import annotations
 
@@ -21,6 +26,39 @@ from stackwiz.state import State
 from stackwiz.tokens import build_backends
 
 log = logging.getLogger("stackwiz.headless")
+
+
+class _HeadlessStreamHandler(logging.Handler):
+    """Mirror every headless log record to stdout (or stderr for ERROR+)."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+        except Exception:  # noqa: BLE001
+            return
+        stream = sys.stderr if record.levelno >= logging.ERROR else sys.stdout
+        try:
+            stream.write(msg + "\n")
+            stream.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _attach_stream_handler() -> _HeadlessStreamHandler:
+    """Attach once-per-process; idempotent on re-invocation."""
+    headless_logger = logging.getLogger("stackwiz.headless")
+    for h in headless_logger.handlers:
+        if isinstance(h, _HeadlessStreamHandler):
+            return h
+    handler = _HeadlessStreamHandler()
+    handler.setFormatter(logging.Formatter("[auto] %(message)s"))
+    headless_logger.addHandler(handler)
+    # Prevent the stream message from propagating twice through the file
+    # handler attached to `stackwiz` root — the file handler also picks up
+    # records that propagate up, so it already gets a copy. propagate=True
+    # keeps install.log forensics; the stream handler we just attached is
+    # the extra terminal-output path.
+    return handler
 
 
 def _load_config_values(
@@ -51,10 +89,8 @@ async def _run(
     state = State(state_dir)
     executor = Executor(manifest_dir=manifest_dir)
 
-    # Compute effective config + domain (state > .stackwiz.env > defaults, with
-    # ${var} substitution) so probes use the overridden domain.
     config_values, effective_domain = _load_config_values(manifest, state, config_env_file)
-    print(f"[auto] effective domain: {effective_domain}")
+    log.info("effective domain: %s", effective_domain)
 
     consul_probe = await probe_consul(effective_domain, manifest.consul_host)
     vault_probe = await probe_vault(effective_domain, manifest.vault_host)
@@ -63,18 +99,20 @@ async def _run(
         state_dir, consul_probe, vault_probe,
     )
     if vault_client is not None:
-        print(f"[auto] vault: {vault_probe.address} ({vault_probe.source.value})")
+        log.info("vault: %s (%s)", vault_probe.address, vault_probe.source.value)
     else:
-        print(f"[auto] vault: not reachable ({vault_probe.detail})")
+        log.info("vault: not reachable (%s)", vault_probe.detail)
     if consul_client is not None:
-        print(f"[auto] consul: {consul_probe.address} ({consul_probe.source.value})"
-              f"{' (ACL token)' if consul_client.token else ' (no ACL token)'}")
+        tok = " (ACL token)" if consul_client.token else " (no ACL token)"
+        log.info(
+            "consul: %s (%s)%s",
+            consul_probe.address, consul_probe.source.value, tok,
+        )
     else:
-        print(f"[auto] consul: not reachable ({consul_probe.detail})")
+        log.info("consul: not reachable (%s)", consul_probe.detail)
 
     component_ids = {c.id for c in manifest.components}
     if mode == "install":
-        # Only block if a REQUIRED backend is missing and not installable
         required_missing = []
         consul_needed = manifest.consul.required and "consul" not in component_ids
         if not consul_probe.reachable and consul_needed:
@@ -82,10 +120,9 @@ async def _run(
         if not vault_probe.reachable and manifest.secrets and "vault" not in component_ids:
             required_missing.append("vault")
         if required_missing:
-            print(
-                "[auto] ERROR: required backends not reachable and not in manifest: "
-                f"{', '.join(required_missing)}",
-                file=sys.stderr,
+            log.error(
+                "required backends not reachable and not in manifest: %s",
+                ", ".join(required_missing),
             )
             return 2
 
@@ -104,66 +141,70 @@ async def _run(
             selected = {
                 c.id for c in manifest.components if c.required or c.default
             }
-        print(f"[auto] selected: {', '.join(sorted(selected))}")
+        log.info("selected: %s", ", ".join(sorted(selected)))
         if forced_refresh:
-            print(f"[auto] forced refresh: {', '.join(sorted(forced_refresh))}")
-        print(f"[auto] config: {config_values}")
-        print("[auto] starting install")
+            log.info("forced refresh: %s", ", ".join(sorted(forced_refresh)))
+        log.info("config: %s", config_values)
+        log.info("starting install")
         try:
             failed = await _drive(engine.install(selected, config_values, forced_refresh))
         except RuntimeError as exc:
             # Typically raised by materialize_secrets when a user-supplied
             # secret is missing from both Vault and `.stackwiz.secrets.env`.
-            print(f"[auto] ERROR: {exc}", file=sys.stderr)
+            log.error("%s", exc)
             return 2
     else:
         if selected_override is not None:
             selected = set(selected_override)
-            # Drop anything the user asked for that was never installed.
             installed_ids = set(state.installed().keys())
             orphans = selected - installed_ids
             if orphans:
-                print(f"[auto] note: not installed: {', '.join(sorted(orphans))}")
+                log.info("note: not installed: %s", ", ".join(sorted(orphans)))
             selected = selected & installed_ids
         else:
             selected = set(state.installed().keys())
-        print(f"[auto] uninstalling: {', '.join(sorted(selected))}")
+        log.info("uninstalling: %s", ", ".join(sorted(selected)))
         failed = await _drive(engine.uninstall(selected))
 
     if failed:
-        print("[auto] FAILED", file=sys.stderr)
+        log.error("FAILED")
         return 1
-    print("[auto] OK")
+    log.info("OK")
     if engine.last_run is not None and engine.last_run.secrets:
-        print("[auto] secrets:")
-        for sid, info in engine.last_run.secrets.items():
-            marker = "new" if info.regenerated else "existing"
-            print(f"  {sid}: {info.vault_path} ({marker})")
+        log.info("secrets:")
+        for sid, secret_info in engine.last_run.secrets.items():
+            marker = "new" if secret_info.regenerated else "existing"
+            log.info("  %s: %s (%s)", sid, secret_info.vault_path, marker)
     return 0
 
 
 async def _drive(iterator) -> bool:
-    """Consume an engine async iterator, print events, return True on failure."""
+    """Consume an engine async iterator, log events, return True on failure."""
     failed = False
     current: str | None = None
     async for event in iterator:
         assert isinstance(event, StepEvent)
         if event.line is not None:
             prefix = "ERR " if event.stream == "stderr" else "    "
-            print(f"{prefix}[{event.component_id}] {event.line}")
+            log.info("%s[%s] %s", prefix, event.component_id, event.line)
             continue
         if event.component_id != current:
             current = event.component_id
-            print(f"[{event.component_id}] {event.status.value}: {event.action.value}"
-                  + (f" — {event.message}" if event.message else ""))
+            suffix = f" -- {event.message}" if event.message else ""
+            log.info(
+                "[%s] %s: %s%s",
+                event.component_id, event.status.value, event.action.value, suffix,
+            )
         elif event.status is Status.DONE:
-            print(f"[{event.component_id}] done")
+            log.info("[%s] done", event.component_id)
         elif event.status is Status.FAILED:
             failed = True
-            print(f"[{event.component_id}] FAILED (exit {event.exit_code})",
-                  file=sys.stderr)
+            log.error(
+                "[%s] FAILED (exit %s)",
+                event.component_id, event.exit_code,
+            )
         elif event.status is Status.SKIPPED:
-            print(f"[{event.component_id}] skipped: {event.message}")
+            log.info("[%s] skipped: %s", event.component_id, event.message)
     return failed
 
 
@@ -178,6 +219,7 @@ def run_headless(
 ) -> int:
     state_dir.mkdir(parents=True, exist_ok=True)
     log_module.configure(state_dir, mode=f"headless:{mode}")
+    _attach_stream_handler()
     return asyncio.run(
         _run(
             manifest, state_dir, manifest_dir, mode, config_env_file,

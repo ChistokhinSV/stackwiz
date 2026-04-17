@@ -191,7 +191,7 @@ def render_markdown(report: ReportData, *, show_secrets: bool = False) -> str:
         lines.append(header)
         lines.append("|---|---|---|")
         for s in report.secrets:
-            flag = " 🔒" if s.immutable else ""
+            flag = " [immutable]" if s.immutable else ""
             shown = s.value if (show_secrets and s.value) else s.masked
             lines.append(f"| `{s.id}`{flag} | `{s.vault_path}` | `{shown}` |")
     lines.append("")

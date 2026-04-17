@@ -288,7 +288,7 @@ def list_cmd(manifest_path: Path, state_dir: Path) -> None:
         if entry is None:
             state_str = "pending"
         elif entry.version != component.version:
-            state_str = f"upgrade→{component.version}"
+            state_str = f"upgrade->{component.version}"
         else:
             state_str = "installed"
         desc = _describe(component)

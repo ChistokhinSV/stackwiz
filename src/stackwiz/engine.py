@@ -108,9 +108,15 @@ class Engine:
         # Re-register services for installed components missing from the
         # catalog. Heals stacks originally installed before the engine could
         # resolve a Consul ACL token (services created anonymously, ACL
-        # rejected the writes, components marked installed anyway → next
+        # rejected the writes, components marked installed anyway -> next
         # run NOOP'd them, leaving the catalog empty forever).
         self._catchup_registrations()
+        # Re-apply Vault runtime read-only policies for installed components.
+        # Catches cases where the first install's policy apply failed (warn-
+        # logged, not fatal) so the component was marked installed but had
+        # no policy; without this the next run NOOPs it and the policy
+        # never lands.
+        self._catchup_service_policies()
         materialized: dict[str, MaterializedSecret] = {}
         if self.vault is not None:
             self._upload_user_secrets()
@@ -448,6 +454,30 @@ class Engine:
             if component.id in installed:
                 self._register_component_services(component)
 
+    def _catchup_service_policies(self) -> None:
+        """Idempotently re-apply per-component runtime policies in Vault.
+
+        Vault's `create_or_update_policy` is idempotent, so re-asserting on
+        every run is cheap. Covers the failure mode where the original
+        install's `apply_service_policy` warn-logged an error but the
+        component was marked installed anyway, and the next run NOOP'd it.
+        """
+        if self.vault is None:
+            return
+        prefix = self.manifest.consul.service_prefix
+        installed = self.state.installed()
+        for component in self.manifest.topo_order():
+            if component.id not in installed:
+                continue
+            if not component.all_consul_services():
+                continue
+            try:
+                self.vault.apply_service_policy(prefix, component.id)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "%s: policy re-apply failed: %s", component.id, exc,
+                )
+
     async def _adopt_consul_after_install(self, current: Component) -> None:
         """Probe for Consul after its own install, adopt the client, and
         retroactively register services for components that ran before it."""
@@ -570,7 +600,7 @@ class Engine:
                 log.warning("failed to upload %s to %s: %s", sid, vault_path, exc)
                 continue
             uploaded.add(sid)
-            log.info("uploaded user-supplied secret %s → %s", sid, vault_path)
+            log.info("uploaded user-supplied secret %s -> %s", sid, vault_path)
         if uploaded:
             rewrite_after_upload(path, self.manifest, uploaded)
 
