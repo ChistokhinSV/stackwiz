@@ -139,14 +139,22 @@ class Engine:
             yield StepEvent(component.id, Status.RUNNING, action, message=action.value)
             log.info("%s: %s", component.id, action.value)
 
-            env = self._component_env(component, config_values, materialized, action)
+            install_token = self._mint_install_token(component)
+            env = self._component_env(
+                component, config_values, materialized, action,
+                vault_token=install_token,
+            )
             script = self._script_for_action(component, action)
 
-            async for event in self._run_script(component, action, script, env):
-                yield event
-                if event.status is Status.FAILED:
-                    result.failed.append(component.id)
-                    return
+            try:
+                async for event in self._run_script(component, action, script, env):
+                    yield event
+                    if event.status is Status.FAILED:
+                        result.failed.append(component.id)
+                        return
+            finally:
+                if install_token and self.vault is not None:
+                    self.vault.revoke_token(install_token)
 
             # Lazy backend bootstrap: after consul/vault installs, probe + adopt.
             if component.id == "consul" and self.consul is None:
@@ -269,12 +277,15 @@ class Engine:
                     log.warning("%s: consul deregister failed: %s", component.id, exc)
 
             if self.vault is not None:
+                prefix = self.manifest.consul.service_prefix
                 try:
-                    self.vault.revoke_service_policy(
-                        self.manifest.consul.service_prefix, component.id
-                    )
+                    self.vault.revoke_service_policy(prefix, component.id)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("%s: vault policy revoke failed: %s", component.id, exc)
+                try:
+                    self.vault.revoke_install_policy(prefix, component.id)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("%s: vault install policy revoke failed: %s", component.id, exc)
 
             self.state.mark_uninstalled(component.id)
             yield StepEvent(component.id, Status.DONE, action, message="removed")
@@ -369,6 +380,45 @@ class Engine:
                 except (asyncio.CancelledError, Exception):  # noqa: BLE001
                     pass
 
+    def _mint_install_token(self, component: Component) -> str | None:
+        """Mint a scoped child token for the component's install script.
+
+        Returns None when the engine should fall back to its own token, which
+        happens for:
+          * components with no Vault backend yet (bootstrapping Vault itself)
+          * the `vault` component — it writes the root policy catalog
+          * any error minting (logged at warning level)
+
+        The caller MUST revoke the returned token once the script finishes.
+        """
+        if self.vault is None or not self.vault.token:
+            return None
+        if component.id == "vault":
+            # Vault install bootstraps everything else; child tokens aren't
+            # available before init completes, and the script legitimately
+            # needs root.
+            return None
+        prefix = self.manifest.consul.service_prefix
+        try:
+            policy = self.vault.create_install_policy(prefix, component.id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "%s: install policy create failed, falling back to parent token: %s",
+                component.id, exc,
+            )
+            return None
+        token = self.vault.create_child_token(
+            policies=[policy],
+            ttl="2h",
+            display_name=f"stackwiz-{component.id}",
+        )
+        if token is None:
+            log.warning(
+                "%s: child token mint failed, falling back to parent token",
+                component.id,
+            )
+        return token
+
     def _script_for_action(self, component: Component, action: Action) -> Path:
         if action is Action.UPGRADE and component.upgrade is not None:
             return component.upgrade
@@ -382,6 +432,7 @@ class Engine:
         config_values: dict[str, Any],
         materialized: dict[str, MaterializedSecret],
         action: Action,
+        vault_token: str | None = None,
     ) -> dict[str, str]:
         env: dict[str, str] = {}
         env.update(component.env)
@@ -425,8 +476,10 @@ class Engine:
                     )
 
         env["VAULT_ADDR"] = self.vault.address if self.vault else ""
-        if self.vault is not None and self.vault._token:
-            env["VAULT_TOKEN"] = self.vault._token
+        if self.vault is not None:
+            token = vault_token or self.vault.token
+            if token:
+                env["VAULT_TOKEN"] = token
         if self.consul is not None:
             env["CONSUL_HTTP_ADDR"] = self.consul.address
             if self.consul._token:

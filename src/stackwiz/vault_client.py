@@ -63,6 +63,10 @@ class VaultClient:
         self._token = token
         self._client.token = token
 
+    @property
+    def token(self) -> str | None:
+        return self._token
+
     # --- init / unseal ----------------------------------------------------------
 
     def initialize(
@@ -164,5 +168,76 @@ class VaultClient:
         name = f"{service_prefix}-{component_id}"
         try:
             self._client.sys.delete_policy(name=name)
+        except hvac.exceptions.VaultError:
+            pass
+
+    def revoke_install_policy(self, service_prefix: str, component_id: str) -> None:
+        name = f"{service_prefix}-{component_id}-install"
+        try:
+            self._client.sys.delete_policy(name=name)
+        except hvac.exceptions.VaultError:
+            pass
+
+    # --- install-time scoped tokens --------------------------------------------
+
+    def create_install_policy(
+        self,
+        service_prefix: str,
+        component_id: str,
+        mount: str = KV_MOUNT,
+    ) -> str:
+        """Policy for install-time access.
+
+        Broader than the runtime policy (apply_service_policy) — the install
+        script needs to WRITE generated secrets under its own path and READ
+        shared secrets. But it still can't touch other components' paths,
+        mount other engines, or create policies.
+        """
+        name = f"{service_prefix}-{component_id}-install"
+        hcl = (
+            f'path "{mount}/data/{service_prefix}/{component_id}/*" '
+            f'{{ capabilities = ["create", "update", "read", "delete", "list"] }}\n'
+            f'path "{mount}/metadata/{service_prefix}/{component_id}/*" '
+            f'{{ capabilities = ["list", "read", "delete"] }}\n'
+            f'path "{mount}/data/{service_prefix}/shared/*" '
+            f'{{ capabilities = ["read"] }}\n'
+            f'path "{mount}/metadata/{service_prefix}/shared/*" '
+            f'{{ capabilities = ["list", "read"] }}\n'
+        )
+        self._client.sys.create_or_update_policy(name=name, policy=hcl)
+        return name
+
+    def create_child_token(
+        self,
+        policies: list[str],
+        ttl: str = "2h",
+        display_name: str = "stackwiz-install",
+    ) -> str | None:
+        """Mint a non-renewable, non-orphan child token with narrow policies.
+
+        Returns the token string, or None if minting fails (caller should warn
+        and fall back to its own token — usually root — with a clear log line).
+        """
+        try:
+            result = self._client.auth.token.create(
+                policies=policies,
+                ttl=ttl,
+                renewable=False,
+                no_parent=False,
+                display_name=display_name,
+            )
+        except hvac.exceptions.VaultError:
+            return None
+        auth = result.get("auth") or {}
+        token = auth.get("client_token")
+        return token if isinstance(token, str) and token else None
+
+    def revoke_token(self, token: str) -> None:
+        """Best-effort revoke of a token. Silent on failure — the token's TTL
+        is the real safety net."""
+        if not token:
+            return
+        try:
+            self._client.auth.token.revoke(token=token)
         except hvac.exceptions.VaultError:
             pass
