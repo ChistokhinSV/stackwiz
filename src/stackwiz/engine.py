@@ -9,11 +9,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from stackwiz.pipeline import ComponentStep
 
 from stackwiz.consul_client import ConsulClient
 from stackwiz.discovery import probe_consul, probe_vault
@@ -105,18 +108,13 @@ class Engine:
         actions = self.state.plan_actions(
             self.manifest, selected_ids, config_values, forced_refresh
         )
-        # Re-register services for installed components missing from the
-        # catalog. Heals stacks originally installed before the engine could
-        # resolve a Consul ACL token (services created anonymously, ACL
-        # rejected the writes, components marked installed anyway -> next
-        # run NOOP'd them, leaving the catalog empty forever).
+        # Catchup passes heal stacks originally installed before the engine
+        # could resolve a Consul ACL token or apply a Vault policy. Both
+        # are idempotent so re-asserting on every run is cheap.
         self._catchup_registrations()
-        # Re-apply Vault runtime read-only policies for installed components.
-        # Catches cases where the first install's policy apply failed (warn-
-        # logged, not fatal) so the component was marked installed but had
-        # no policy; without this the next run NOOPs it and the policy
-        # never lands.
         self._catchup_service_policies()
+        # Materialize secrets up front when Vault is already there; the
+        # vault-install step (if any) will refresh via _adopt_vault_after_install.
         materialized: dict[str, MaterializedSecret] = {}
         if self.vault is not None:
             self._upload_user_secrets()
@@ -124,48 +122,19 @@ class Engine:
         result = EngineResult(secrets=materialized)
         self.last_run = result
 
-        for component in self.manifest.topo_order():
-            action = actions[component.id]
-            if action is Action.NOOP:
-                yield StepEvent(
-                    component.id, Status.SKIPPED, action, message="up to date",
-                )
-                result.skipped.append(component.id)
-                continue
-
-            yield StepEvent(component.id, Status.RUNNING, action, message=action.value)
-            log.info("%s: %s", component.id, action.value)
-
-            install_token = self._mint_install_token(component)
-            env = self._component_env(
-                component, config_values, materialized, action,
-                vault_token=install_token,
-            )
-            script = self._script_for_action(component, action)
-            try:
-                async for event in self._run_script(component, action, script, env):
-                    yield event
-                    if event.status is Status.FAILED:
-                        result.failed.append(component.id)
-                        return
-            finally:
-                if install_token and self.vault is not None:
-                    self.vault.revoke_token(install_token)
-
-            # Lazy backend adoption after the component that provides it.
-            if component.id == "consul" and self.consul is None:
-                await self._adopt_consul_after_install(component)
-            if component.id == "vault" and self.vault is None:
-                materialized = await self._adopt_vault_after_install(
-                    result, materialized,
-                )
-
-            self._post_component_publish(component, config_values)
-
-            cfg_hash = component_config_hash(component, config_values)
-            self.state.mark_installed(component, cfg_hash)
-            yield StepEvent(component.id, Status.DONE, action, message="done")
-            result.succeeded.append(component.id)
+        steps = self._build_install_steps(
+            actions, config_values, materialized, result,
+        )
+        from stackwiz.pipeline import run_pipeline
+        async for event in run_pipeline(self, steps):
+            yield event
+            if event.status is Status.FAILED:
+                result.failed.append(event.component_id)
+                return
+            if event.status is Status.DONE:
+                result.succeeded.append(event.component_id)
+            elif event.status is Status.SKIPPED:
+                result.skipped.append(event.component_id)
 
         log.info(
             "install finished: %d ok, %d failed, %d skipped",
@@ -177,44 +146,12 @@ class Engine:
 
     async def uninstall(self, selected_ids: set[str]) -> AsyncIterator[StepEvent]:
         actions = self.state.plan_uninstall(self.manifest, selected_ids)
-        order = list(reversed(self.manifest.topo_order()))
-
-        for component in order:
-            action = actions.get(component.id, Action.NOOP)
-            if action is Action.NOOP:
-                yield StepEvent(component.id, Status.SKIPPED, action, message="not installed")
-                continue
-
-            yield StepEvent(component.id, Status.RUNNING, action, message="uninstall")
-            log.info("%s: uninstall", component.id)
-
-            if component.uninstall is not None:
-                async for event in self._run_script(
-                    component, action, component.uninstall, {}
-                ):
-                    yield event
-                    if event.status is Status.FAILED:
-                        return
-
-            if self.consul is not None:
-                try:
-                    self.consul.deregister_service(component)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("%s: consul deregister failed: %s", component.id, exc)
-
-            if self.vault is not None:
-                prefix = self.manifest.consul.service_prefix
-                try:
-                    self.vault.revoke_service_policy(prefix, component.id)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("%s: vault policy revoke failed: %s", component.id, exc)
-                try:
-                    self.vault.revoke_install_policy(prefix, component.id)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("%s: vault install policy revoke failed: %s", component.id, exc)
-
-            self.state.mark_uninstalled(component.id)
-            yield StepEvent(component.id, Status.DONE, action, message="removed")
+        steps = self._build_uninstall_steps(actions)
+        from stackwiz.pipeline import run_pipeline
+        async for event in run_pipeline(self, steps):
+            yield event
+            if event.status is Status.FAILED:
+                return
 
         # Best-effort cleanup of leftover data. When consul/vault are themselves
         # being uninstalled they're already gone by this point — their own
@@ -233,6 +170,126 @@ class Engine:
                 self.consul.kv_delete_tree(f"{self.manifest.consul.service_prefix}/config/")
             except Exception as exc:  # noqa: BLE001
                 log.info("consul KV cleanup skipped (backend already down): %s", exc)
+
+    # --- step-list builders -----------------------------------------------------
+
+    def _build_install_steps(
+        self,
+        actions: dict[str, Action],
+        config_values: dict[str, Any],
+        materialized: dict[str, MaterializedSecret],
+        result: EngineResult,
+    ) -> list[ComponentStep]:
+        """Compose one ComponentStep per component the plan touches.
+
+        Backend-adoption hooks attach to the specific consul/vault steps as
+        ``post_execute`` callbacks — not ``if component.id == ...`` branches
+        sprinkled through the install loop.
+        """
+        from stackwiz.pipeline import ComponentStep
+
+        # Mutable box so _adopt_vault_after_install can swap the materialized
+        # dict when Vault first becomes available mid-install.
+        mat_box: list[dict[str, MaterializedSecret]] = [materialized]
+        steps: list[ComponentStep] = []
+        for component in self.manifest.topo_order():
+            action = actions[component.id]
+            if action is Action.NOOP:
+                steps.append(ComponentStep(
+                    component=component, action=action,
+                    skip=True, skip_message="up to date",
+                ))
+                continue
+
+            # Prepare closure: mint the install token and build env with the
+            # current materialized map (may have been refreshed by the vault
+            # step earlier in this run).
+            def _prepare(c=component, a=action) -> tuple[dict[str, str], str | None]:
+                log.info("%s: %s", c.id, a.value)
+                token = self._mint_install_token(c)
+                env = self._component_env(
+                    c, config_values, mat_box[0], a, vault_token=token,
+                )
+                return env, token
+
+            # Lazy adoption: only runs for the consul / vault component ids.
+            post_execute: Callable[[], Any] | None = None
+            if component.id == "consul":
+                async def _adopt_consul(c=component) -> None:
+                    if self.consul is None:
+                        await self._adopt_consul_after_install(c)
+                post_execute = _adopt_consul
+            elif component.id == "vault":
+                async def _adopt_vault() -> None:
+                    if self.vault is None:
+                        mat_box[0] = await self._adopt_vault_after_install(
+                            result, mat_box[0],
+                        )
+                post_execute = _adopt_vault
+
+            def _persist(c=component) -> None:
+                cfg_hash = component_config_hash(c, config_values)
+                self.state.mark_installed(c, cfg_hash)
+
+            steps.append(ComponentStep(
+                component=component,
+                action=action,
+                script=self._script_for_action(component, action),
+                prepare=_prepare,
+                post_execute=post_execute,
+                post_publish=lambda c=component: self._post_component_publish(c, config_values),
+                persist=_persist,
+            ))
+        return steps
+
+    def _build_uninstall_steps(
+        self,
+        actions: dict[str, Action],
+    ) -> list[ComponentStep]:
+        """Compose one ComponentStep per component in reverse topo order.
+
+        Uninstall has no prepare (no scoped tokens) and no post_execute
+        (nothing to adopt); its post_publish does deregister + policy revoke.
+        """
+        from stackwiz.pipeline import ComponentStep
+
+        steps: list[ComponentStep] = []
+        for component in reversed(self.manifest.topo_order()):
+            action = actions.get(component.id, Action.NOOP)
+            if action is Action.NOOP:
+                steps.append(ComponentStep(
+                    component=component, action=action,
+                    skip=True, skip_message="not installed",
+                ))
+                continue
+
+            def _cleanup_backends(c=component) -> None:
+                log.info("%s: uninstall", c.id)
+                if self.consul is not None:
+                    try:
+                        self.consul.deregister_service(c)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("%s: consul deregister failed: %s", c.id, exc)
+                if self.vault is not None:
+                    prefix = self.manifest.consul.service_prefix
+                    try:
+                        self.vault.revoke_service_policy(prefix, c.id)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("%s: vault policy revoke failed: %s", c.id, exc)
+                    try:
+                        self.vault.revoke_install_policy(prefix, c.id)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("%s: vault install policy revoke failed: %s", c.id, exc)
+
+            steps.append(ComponentStep(
+                component=component,
+                action=action,
+                script=component.uninstall,  # may be None → pipeline skips script phase
+                post_publish=_cleanup_backends,
+                persist=lambda c=component: self.state.mark_uninstalled(c.id),
+                done_message="removed",
+            ))
+        return steps
 
     # --- helpers ----------------------------------------------------------------
 
