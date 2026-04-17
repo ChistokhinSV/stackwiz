@@ -317,68 +317,47 @@ class Engine:
         script: Path,
         env: dict[str, str],
     ) -> AsyncIterator[StepEvent]:
-        queue: asyncio.Queue[StepEvent] = asyncio.Queue()
         # Dedicated per-component logger so log lines carry the component id
-        # without string formatting on every line.
+        # without string formatting on every line. Forwards to install.log via
+        # log_module.configure() (called from both app.py and headless.py).
         script_log = logging.getLogger(f"stackwiz.script.{component.id}")
-        script_log.info("→ running %s (%s)", script, action.value)
+        script_log.info("-> running %s (%s)", script, action.value)
 
-        async def pump() -> None:
-            try:
-                async for stream, text in self.executor.run(script, env):
-                    if stream == "exit":
-                        code = int(text)
-                        if code == 0:
-                            script_log.info("← exit 0 (ok)")
-                            await queue.put(
-                                StepEvent(
-                                    component.id, Status.RUNNING, action,
-                                    message="script ok", exit_code=0,
-                                )
-                            )
-                        else:
-                            script_log.error("← exit %d (FAILED)", code)
-                            await queue.put(
-                                StepEvent(
-                                    component.id, Status.FAILED, action,
-                                    message=f"exit {code}", exit_code=code,
-                                )
-                            )
-                    else:
-                        # Forward every stdout/stderr line to install.log at
-                        # INFO (stdout) or WARNING (stderr) level. This is the
-                        # primary forensic trail — both TUI and headless modes
-                        # get it because log_module.configure() is called in
-                        # both app.py and headless.py.
-                        if stream == "stderr":
-                            script_log.warning("%s", text)
-                        else:
-                            script_log.info("%s", text)
-                        await queue.put(
-                            StepEvent(
-                                component.id, Status.RUNNING, action,
-                                line=text, stream=stream,
-                            )
-                        )
-            finally:
-                await queue.put(StepEvent(component.id, Status.RUNNING, action, message="__end__"))
-
-        task = asyncio.create_task(pump())
         try:
-            while True:
-                event = await queue.get()
-                if event.message == "__end__":
+            async for stream, text in self.executor.run(script, env):
+                if stream == "exit":
+                    code = int(text)
+                    if code == 0:
+                        script_log.info("<- exit 0 (ok)")
+                        yield StepEvent(
+                            component.id, Status.RUNNING, action,
+                            message="script ok", exit_code=0,
+                        )
+                    else:
+                        script_log.error("<- exit %d (FAILED)", code)
+                        yield StepEvent(
+                            component.id, Status.FAILED, action,
+                            message=f"exit {code}", exit_code=code,
+                        )
                     return
-                yield event
-                if event.status is Status.FAILED:
-                    return
-        finally:
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                    pass
+                if stream == "stderr":
+                    script_log.warning("%s", text)
+                else:
+                    script_log.info("%s", text)
+                yield StepEvent(
+                    component.id, Status.RUNNING, action,
+                    line=text, stream=stream,
+                )
+        except asyncio.CancelledError:
+            # Consumer cancelled (e.g. TUI quit) — let executor.run()'s own
+            # cancellation handling terminate the subprocess and re-raise.
+            raise
+        except Exception as exc:  # noqa: BLE001
+            script_log.exception("script aborted: %s", exc)
+            yield StepEvent(
+                component.id, Status.FAILED, action,
+                message=f"script error: {exc}", exit_code=-1,
+            )
 
     def _mint_install_token(self, component: Component) -> str | None:
         """Mint a scoped child token for the component's install script.
