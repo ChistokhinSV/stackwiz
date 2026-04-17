@@ -279,6 +279,8 @@ docker run --rm -v "$PWD:/out" ghcr.io/chistokhinsv/stackwiz:latest \
 
 This writes `stackwiz-bootstrap.sh` (the library, commit this to the repo alongside your manifest) and a starter `bootstrap.sh` stub. Vendoring the library makes bootstrap work on air-gapped hosts — no network round-trip to GitHub at run time.
 
+**`stackwiz-bootstrap.sh` has no editable template — the framework file is the source of truth.** The canonical copy lives at [`src/stackwiz/share/bootstrap/stackwiz-bootstrap.sh`](../src/stackwiz/share/bootstrap/stackwiz-bootstrap.sh) in the framework repo and is bundled into the wheel; `extract-bootstrap` copies it verbatim. Only the stub has a template (`docs/bootstrap.sh.template`) because the stub is the part consumers customize. Treat the vendored `stackwiz-bootstrap.sh` in your repo as read-only — don't hand-edit it. To adopt upstream fixes (security patches, new helpers), re-run the extract command to refresh the vendored copy; see [Refreshing the library](#refreshing-the-library) below.
+
 ### 2. Minimal stub
 
 ```bash
