@@ -6,20 +6,36 @@
 #     echo "cert is $CERT_PATH, key is $KEY_PATH"
 #
 # Ladder (each step is tried, first success wins):
-#   1. existing cert still valid >30 days (idempotent re-run)
-#   2. Let's Encrypt via Cloudflare DNS-01  (needs CF_DNS_API_TOKEN)
-#   3. Let's Encrypt via Route53 DNS-01     (needs AWS_DNS_ACCESS_KEY_ID + AWS_DNS_SECRET_ACCESS_KEY)
-#   4. Let's Encrypt via HTTP-01 standalone (needs port 80 reachable from the internet)
-#   5. self-signed
+#   1. operator-provided "bring-your-own" cert at /etc/stackwiz/tls/custom/<host>/
+#   2. existing cert still valid >30 days (idempotent re-run)
+#   3. Let's Encrypt via Cloudflare DNS-01  (needs CF_DNS_API_TOKEN)
+#   4. Let's Encrypt via Route53 DNS-01     (needs AWS_DNS_ACCESS_KEY_ID + AWS_DNS_SECRET_ACCESS_KEY)
+#   5. Let's Encrypt via HTTP-01 standalone (needs port 80 reachable from the internet)
+#   6. self-signed (CA + leaf)
 #
 # Opt-in flags (env):
 #   STACKWIZ_TLS_MODE   auto | self-signed | letsencrypt    (default: auto)
 #   STACKWIZ_TLS_FORCE  1 to bypass the 30-day idempotency check
 #   CERTBOT_EMAIL       email for Let's Encrypt registration (default: admin@<hostname>)
 #
+# Bring-your-own-certificate (BYOC):
+#   Drop files at /etc/stackwiz/tls/custom/<hostname>/ to override every
+#   other source for that hostname:
+#     cert.pem     leaf (required)
+#     key.pem      private key (required, chmod 0600)
+#     ca.pem       CA chain clients should trust (optional)
+#                  — if absent, clients fall back to system trust
+#                  — if present, vault.sh etc. publish it to
+#                    /var/lib/stackwiz/shared/vault-ca.crt so sibling
+#                    stacks automatically trust the chain
+#   Replacing a self-signed/LE cert later: drop new files into the same
+#   path and run `./bootstrap.sh refresh <component>` — the custom cert
+#   check runs BEFORE reuse, so the old cached cert is bypassed.
+#
 # Adapted from C:\HOME\1.SCRIPTS\061.awx_installation\remote\nginx\generate-cert.sh.
 
 stackwiz_tls_self_signed_dir() { echo "/etc/stackwiz/tls"; }
+stackwiz_tls_custom_dir()      { echo "/etc/stackwiz/tls/custom"; }
 
 stackwiz_tls_paths() {
     local host="$1"
@@ -43,6 +59,46 @@ stackwiz_tls_cert_fresh() {
     local window="${2:-2592000}"
     [ -f "$cert" ] || return 1
     openssl x509 -checkend "$window" -noout -in "$cert" >/dev/null 2>&1
+}
+
+# Operator-provided "bring-your-own" cert. Checked BEFORE the reuse cache
+# and the LE ladder — when the operator drops files at the custom path,
+# their intent overrides every other TLS source for that hostname.
+#
+# Expected files (all PEM):
+#   /etc/stackwiz/tls/custom/<host>/cert.pem   leaf cert (required)
+#   /etc/stackwiz/tls/custom/<host>/key.pem    private key (required)
+#   /etc/stackwiz/tls/custom/<host>/ca.pem     CA chain (optional — when
+#                                              present, treated as CA_PATH
+#                                              and published to sibling
+#                                              stacks via the usual channel)
+#
+# Returns 0 with CERT_PATH/KEY_PATH/CA_PATH set on success, 1 otherwise.
+# Refuses an expired cert even if the files are present — better to fall
+# through than to serve expired TLS.
+stackwiz_tls_try_custom() {
+    local host="$1"
+    local dir cert key ca
+    dir="$(stackwiz_tls_custom_dir)/${host}"
+    cert="${dir}/cert.pem"
+    key="${dir}/key.pem"
+    ca="${dir}/ca.pem"
+    [ -f "$cert" ] && [ -f "$key" ] || return 1
+    # Any remaining validity is fine — the operator owns the lifecycle
+    # and may be replacing the cert right now. Only reject clearly-
+    # expired certs (checkend window = 0 means "expired at this instant").
+    if ! stackwiz_tls_cert_fresh "$cert" 0; then
+        echo "stackwiz-tls: custom cert ${cert} is EXPIRED — falling through" >&2
+        return 1
+    fi
+    CERT_PATH="$cert"
+    KEY_PATH="$key"
+    CA_PATH=""
+    [ -f "$ca" ] && CA_PATH="$ca"
+    local ca_note="no ca.pem; clients use system trust"
+    [ -n "$CA_PATH" ] && ca_note="ca.pem published as trust anchor"
+    echo "stackwiz-tls: using BYOC cert for ${host} from ${dir} (${ca_note})"
+    return 0
 }
 
 # Returns 0 if any Let's Encrypt path is actually viable right now.
@@ -316,6 +372,11 @@ stackwiz_tls_ensure() {
     local mode="${STACKWIZ_TLS_MODE:-auto}"
     local email="${CERTBOT_EMAIL:-admin@${host}}"
     CERT_PATH=""; KEY_PATH=""; CA_PATH=""
+
+    # 0. Operator-provided custom cert wins over every other path.
+    #    Checked FIRST so dropping a new cert and running `refresh` takes
+    #    effect immediately, without the reuse cache shadowing it.
+    if stackwiz_tls_try_custom "$host"; then return 0; fi
 
     # 1. Reuse existing fresh cert.
     if stackwiz_tls_reuse_existing "$host"; then return 0; fi
