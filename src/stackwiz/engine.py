@@ -236,10 +236,10 @@ class Engine:
                         await self._adopt_consul_after_install(c)
                 post_execute = _adopt_consul
             elif component.id == "vault":
-                async def _adopt_vault() -> None:
+                async def _adopt_vault(cv=config_values) -> None:
                     if self.vault is None:
                         mat_box[0] = await self._adopt_vault_after_install(
-                            result, mat_box[0],
+                            result, mat_box[0], cv,
                         )
                 post_execute = _adopt_vault
 
@@ -601,6 +601,7 @@ class Engine:
         self,
         result: EngineResult,
         materialized: dict[str, MaterializedSecret],
+        config_values: dict[str, Any] | None = None,
     ) -> dict[str, MaterializedSecret]:
         """Probe for Vault after its install, adopt the client, and
         materialize secrets if they weren't already. Returns the possibly
@@ -618,8 +619,19 @@ class Engine:
         Loud warn-log on every failure path so the operator can diagnose if
         downstream components later fail due to missing materialized secrets.
         """
+        # Use the EFFECTIVE domain (operator override via .stackwiz.env)
+        # rather than the manifest default — otherwise the probe tries
+        # vault.example.com on a fresh VM where the operator configured
+        # vault.sopslab.in, DNS for example.com fails, and the probe
+        # falls back to loopback. Loopback works for reachability but
+        # VAULT_ADDR=https://127.0.0.1:8200 then flows into every install
+        # script's curl --cacert calls, tripping TLS hostname checks
+        # because the cert's SAN doesn't include 127.0.0.1 by default.
+        effective_domain = (
+            (config_values or {}).get("domain") or self.manifest.domain
+        )
         probe = await probe_vault(
-            self.manifest.domain, self.manifest.vault_host,
+            effective_domain, self.manifest.vault_host,
         )
         token_file = self.state.state_dir / "vault-token"
         just_installed = token_file.exists()
@@ -631,7 +643,7 @@ class Engine:
                 "self-signed cert)", probe.detail,
             )
             probe = await probe_vault(
-                self.manifest.domain, self.manifest.vault_host,
+                effective_domain, self.manifest.vault_host,
                 verify_override=False,
             )
         if not (probe.reachable and probe.address):
@@ -640,7 +652,7 @@ class Engine:
                 "needing stackwiz-generated secrets will fail. Check that "
                 "the install script brought vault up and the engine can "
                 "reach it at vault.%s or 127.0.0.1:8200.",
-                probe.detail, self.manifest.domain,
+                probe.detail, effective_domain,
             )
             return materialized
         token = token_file.read_text().strip() if just_installed else None

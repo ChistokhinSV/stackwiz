@@ -303,8 +303,18 @@ stackwiz_tls_self_sign() {
         chmod 644 "$ca_cert"
     fi
 
-    local san_parts="DNS:${host}"
-    if [ -n "${STACKWIZ_TLS_EXTRA_IP:-}" ]; then
+    # SANs: hostname + loopback + optional extra IP. 127.0.0.1 is included
+    # by default because install scripts commonly address backends via
+    # loopback (e.g. the engine adopts Vault at https://127.0.0.1:8200
+    # when DNS for the configured hostname isn't resolvable from the
+    # installer container), and curl --cacert still enforces hostname
+    # verification — a cert with SAN=DNS:vault.sopslab.in alone rejects
+    # a connection to https://127.0.0.1/... even though the chain is
+    # trusted. Adding the loopback SAN fixes every such intra-host
+    # verify failure without disabling TLS checks.
+    local san_parts="DNS:${host},IP:127.0.0.1"
+    if [ -n "${STACKWIZ_TLS_EXTRA_IP:-}" ] \
+        && [ "${STACKWIZ_TLS_EXTRA_IP}" != "127.0.0.1" ]; then
         san_parts="${san_parts},IP:${STACKWIZ_TLS_EXTRA_IP}"
     fi
 
