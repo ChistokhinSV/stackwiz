@@ -210,3 +210,38 @@ def test_shred_overwrites_before_unlinking(tmp_path: Path) -> None:
     with patch.object(Path, "unlink", peek_and_unlink):
         shred_vault_init(tmp_path)
     assert captured["bytes"] == b"\x00" * original_size
+
+
+# --- ensure_shared_kb_sync_keypair (SCR-173) --------------------------------
+
+
+def test_ensure_kb_sync_keypair_noop_when_already_seeded(client: VaultClient) -> None:
+    """If the pubkey is already in Vault, no keypair is generated — this
+    is the common re-run path. Write paths (kv_put) must NOT be called."""
+    client._client.secrets.kv.v2.read_secret_version.return_value = {
+        "data": {"data": {"value": "ssh-ed25519 AAAA... kb-sync@stackwiz"}}
+    }
+    client.ensure_shared_kb_sync_keypair()
+    client._client.secrets.kv.v2.create_or_update_secret.assert_not_called()
+
+
+def test_ensure_kb_sync_keypair_seeds_when_absent(client: VaultClient) -> None:
+    """First call on a fresh Vault: generate, store key+pubkey at the
+    documented paths with OpenSSH-formatted payloads. SCR-173 fixes a
+    race where satellites ran before this seed happened."""
+    client._client.secrets.kv.v2.read_secret_version.side_effect = (
+        hvac.exceptions.InvalidPath("no such secret")
+    )
+    client.ensure_shared_kb_sync_keypair()
+    calls = client._client.secrets.kv.v2.create_or_update_secret.call_args_list
+    paths = {c.kwargs["path"] for c in calls}
+    assert paths == {"shared/kb_sync_ssh_key", "shared/kb_sync_ssh_pubkey"}
+    for c in calls:
+        value = c.kwargs["secret"]["value"]
+        assert isinstance(value, str) and value
+        if c.kwargs["path"].endswith("pubkey"):
+            assert value.startswith("ssh-ed25519 ")
+            assert value.endswith("kb-sync@stackwiz")
+        else:
+            # Private key: OpenSSH PEM begins with this header.
+            assert value.startswith("-----BEGIN OPENSSH PRIVATE KEY-----")

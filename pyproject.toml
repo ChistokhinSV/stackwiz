@@ -18,6 +18,11 @@ dependencies = [
     "dnspython>=2.6",
     "python-consul2>=0.1.5",
     "hvac>=2.3",
+    # Ed25519 keypair generation for the shared kb-sync identity seeded
+    # into Vault on first install (see ensure_shared_kb_sync_keypair).
+    # Already pulled in transitively by several deps; declaring it
+    # explicitly so the runtime always has it.
+    "cryptography>=42",
 ]
 
 [project.scripts]

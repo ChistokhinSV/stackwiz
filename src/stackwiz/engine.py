@@ -126,6 +126,13 @@ class Engine:
                 self.vault.ensure_kv_mount()
             except Exception as exc:  # noqa: BLE001
                 log.warning("vault kv mount ensure failed: %s", exc)
+            # SCR-173: seed the shared kb-sync keypair BEFORE any
+            # install script runs so kb-publish satellites never race
+            # the central kb-agent that historically owned generation.
+            try:
+                self.vault.ensure_shared_kb_sync_keypair()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("kb-sync identity seed failed: %s", exc)
             self._upload_user_secrets()
             materialized = materialize_secrets(self.manifest, self.vault)
         result = EngineResult(secrets=materialized)
@@ -650,6 +657,14 @@ class Engine:
             self.vault.ensure_kv_mount()
         except Exception as exc:  # noqa: BLE001
             log.warning("vault kv mount failed: %s", exc)
+        # SCR-173: same shared-identity seed as the upfront path — on a
+        # fresh-Vault install this is the FIRST chance to populate it,
+        # and any component that triggers kb-publish later in this run
+        # must find it in place.
+        try:
+            self.vault.ensure_shared_kb_sync_keypair()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("kb-sync identity seed failed: %s", exc)
         if materialized:
             return materialized
         try:
