@@ -83,6 +83,7 @@ class Engine:
         self.consul = consul
         self.vault = vault
         self.last_run: EngineResult | None = None
+        self._config_values: dict[str, Any] | None = None
 
     # --- install / upgrade / reconfigure ----------------------------------------
 
@@ -105,6 +106,12 @@ class Engine:
         self._stage_host_helpers()
         self.state.save_config(config_values)
         self._node_ip = self._resolve_node_ip(config_values)
+        # Stash the effective config so service-registration can
+        # interpolate ${...} placeholders in consul_service.address
+        # (e.g. `address: "${authentik_hostname}"` renders against the
+        # operator's override). Catchup paths running outside install()
+        # fall back to self._node_ip verbatim when this is None.
+        self._config_values = dict(config_values)
         actions = self.state.plan_actions(
             self.manifest, selected_ids, config_values, forced_refresh
         )
@@ -534,12 +541,26 @@ class Engine:
                         "%s: pre-register deregister %s: %s",
                         component.id, svc.name, exc,
                     )
+            # Render ${...} placeholders in the advertised address
+            # against effective config_values — so consul_service.address
+            # can read `"${authentik_hostname}"` and get the operator's
+            # current value. Interpolating at registration time (instead
+            # of at manifest-load) keeps the substitution reactive to
+            # .stackwiz.env overrides.
+            resolved_svc = svc
+            if svc.address and "${" in svc.address and self._config_values:
+                from stackwiz.config_overrides import _interpolate
+                new_addr = _interpolate(svc.address, self._config_values)
+                if new_addr != svc.address:
+                    resolved_svc = svc.model_copy(update={"address": new_addr})
             try:
                 self.consul.register_service(
-                    component, svc, node_address=self._node_ip,
+                    component, resolved_svc, node_address=self._node_ip,
                 )
                 log.info(
-                    "%s: registered in consul as %s", component.id, svc.name,
+                    "%s: registered in consul as %s (address=%s)",
+                    component.id, resolved_svc.name,
+                    resolved_svc.address or self._node_ip,
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning(

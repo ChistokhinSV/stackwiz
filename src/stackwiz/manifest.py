@@ -72,6 +72,13 @@ class ConsulService(_LeafModel):
     tags: list[str] = Field(default_factory=list)
     meta: dict[str, str] = Field(default_factory=dict)
     check: ConsulServiceCheck | None = None
+    # Address to advertise in the Consul catalog. When omitted, the
+    # engine uses the node's LAN IP (as before). Set to a public
+    # hostname for HTTP services fronted by nginx so consumers
+    # discovering the service via Consul get the externally-reachable
+    # address, not the host's internal IP. Templated — supports
+    # ${config_field} interpolation against manifest config values.
+    address: str | None = None
 
 
 class ConsulDiscover(_LeafModel):

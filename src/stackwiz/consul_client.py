@@ -86,13 +86,17 @@ class ConsulClient:
                     interval=svc.check.interval,
                     timeout=svc.check.timeout,
                 )
-        # python-consul2's agent endpoints don't inherit the constructor
-        # token — it has to be passed per-call. Without this, ACL-enforcing
-        # Consul rejects registration as anonymous.
+        # Address advertised in the catalog. Operators override via
+        # manifest's consul_service.address to publish a public hostname
+        # (resolved through nginx) instead of the node's internal IP —
+        # consumers discovering the service via Consul get the
+        # externally-reachable address. Falls back to node IP when not
+        # set (legacy behaviour).
+        register_address = svc.address or node_address
         self._client.agent.service.register(
             name=svc.name,
             service_id=f"{svc.name}-{component.id}",
-            address=node_address,
+            address=register_address,
             port=svc.port,
             tags=list(svc.tags),
             meta=dict(svc.meta) if svc.meta else None,

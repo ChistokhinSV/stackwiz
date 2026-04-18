@@ -120,3 +120,34 @@ def test_tls_skip_verify_requires_http() -> None:
 
     with pytest.raises(ValidationError, match="tls_skip_verify"):
         ConsulServiceCheck(tcp="127.0.0.1:161", tls_skip_verify=True)
+
+
+def test_register_service_defaults_address_to_node_ip(
+    client: ConsulClient,
+) -> None:
+    """Services without address: advertised under the node IP (legacy shape)."""
+    from stackwiz.manifest import ConsulService
+
+    component = MagicMock()
+    component.id = "foo"
+    svc = ConsulService(name="foo", port=1234)
+    client.register_service(component, svc, node_address="192.168.0.5")
+    kwargs = client._client.agent.service.register.call_args.kwargs
+    assert kwargs["address"] == "192.168.0.5"
+
+
+def test_register_service_uses_declared_address(
+    client: ConsulClient,
+) -> None:
+    """address: in the manifest overrides node_ip — so services behind nginx
+    can be advertised under their public hostname + 443 instead of the
+    internal container port."""
+    from stackwiz.manifest import ConsulService
+
+    component = MagicMock()
+    component.id = "foo"
+    svc = ConsulService(name="foo", port=443, address="foo.example.com")
+    client.register_service(component, svc, node_address="192.168.0.5")
+    kwargs = client._client.agent.service.register.call_args.kwargs
+    assert kwargs["address"] == "foo.example.com"
+    assert kwargs["port"] == 443
