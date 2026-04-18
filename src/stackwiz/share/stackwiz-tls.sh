@@ -72,6 +72,10 @@ stackwiz_tls_reuse_existing() {
 
     if stackwiz_tls_cert_fresh "$le_cert"; then
         CERT_PATH="$le_cert"; KEY_PATH="$le_key"
+        # LE certs chain to a public root that every client trusts via
+        # system trust store — no CA needs to be published for sibling
+        # consumers.
+        CA_PATH=""
         echo "stackwiz-tls: reusing Let's Encrypt cert for ${host} (>30 days remaining)"
         return 0
     fi
@@ -84,7 +88,21 @@ stackwiz_tls_reuse_existing() {
         return 1
     fi
     if stackwiz_tls_cert_fresh "$ss_cert"; then
-        CERT_PATH="$ss_cert"; KEY_PATH="$ss_key"
+        local ss_dir fullchain
+        ss_dir="$(stackwiz_tls_self_signed_dir)"
+        fullchain="${ss_dir}/${host}.fullchain.crt"
+        # Prefer fullchain (server cert + stackwiz CA) if it exists —
+        # servers should serve that so strict TLS clients can build the
+        # chain. Legacy self-signed installs (pre-CA refactor) only have
+        # the lone cert; fall back to serving that.
+        if [ -f "$fullchain" ]; then
+            CERT_PATH="$fullchain"
+        else
+            CERT_PATH="$ss_cert"
+        fi
+        KEY_PATH="$ss_key"
+        CA_PATH="${ss_dir}/stackwiz-ca.crt"
+        [ -f "$CA_PATH" ] || CA_PATH=""
         echo "stackwiz-tls: reusing self-signed cert for ${host} (>30 days remaining)"
         return 0
     fi
@@ -124,7 +142,7 @@ stackwiz_tls_try_cloudflare() {
         --dns-cloudflare-propagation-seconds 30 \
         -d "$host" --non-interactive --agree-tos --email "$email" >/dev/null 2>&1 \
         && [ -f "$le_cert" ] && [ -f "$le_key" ]; then
-        CERT_PATH="$le_cert"; KEY_PATH="$le_key"
+        CERT_PATH="$le_cert"; KEY_PATH="$le_key"; CA_PATH=""
         echo "stackwiz-tls: obtained via Cloudflare DNS-01"
         return 0
     fi
@@ -159,7 +177,7 @@ stackwiz_tls_try_route53() {
         if [ -f "${renewal_conf}" ] && ! grep -q 'pre_hook' "${renewal_conf}"; then
             printf '\n[renewalparams]\npre_hook = . %s\n' "${aws_env}" >> "${renewal_conf}"
         fi
-        CERT_PATH="$le_cert"; KEY_PATH="$le_key"
+        CERT_PATH="$le_cert"; KEY_PATH="$le_key"; CA_PATH=""
         echo "stackwiz-tls: obtained via Route53 DNS-01"
         return 0
     fi
@@ -182,7 +200,7 @@ stackwiz_tls_try_standalone() {
     fi
     systemctl start nginx 2>/dev/null || true
     if [ "$ok" = "1" ]; then
-        CERT_PATH="$le_cert"; KEY_PATH="$le_key"
+        CERT_PATH="$le_cert"; KEY_PATH="$le_key"; CA_PATH=""
         echo "stackwiz-tls: obtained via HTTP-01 standalone"
         return 0
     fi
@@ -192,27 +210,72 @@ stackwiz_tls_try_standalone() {
 # --- Self-signed fallback ---
 
 stackwiz_tls_self_sign() {
+    # Generate a proper PKI instead of a lone self-signed server cert:
+    #   1. Persistent CA under /etc/stackwiz/tls/stackwiz-ca.{crt,key}
+    #      (CA:TRUE, keyCertSign). Created once, reused across every
+    #      stackwiz self-signed cert on this host.
+    #   2. Server cert for $host signed BY the CA (CA:FALSE,
+    #      extendedKeyUsage=serverAuth, SAN=DNS:$host[,IP:...]).
+    #   3. Fullchain = server cert + CA concatenated, so TLS servers
+    #      (Vault, nginx) serving fullchain let clients build the chain
+    #      even when they only trust the CA.
+    #
+    # Why: a lone self-signed cert used as both server and trust anchor
+    # is rejected by OpenSSL 3.x / Python's ssl module with error 18
+    # "self-signed certificate at depth 0" even when passed as verify=PATH.
+    # Splitting into CA + leaf cert fixes that without disabling
+    # verification. The CA is what sibling consumers on this host trust
+    # (published via vault.sh to /var/lib/stackwiz/shared/vault-ca.crt).
     local host="$1"
-    local ss_cert ss_key ss_dir
+    local ss_cert ss_key ss_dir ca_cert ca_key fullchain
     read -r ss_cert ss_key < <(stackwiz_tls_paths "$host")
     ss_dir="$(stackwiz_tls_self_signed_dir)"
     mkdir -p "$ss_dir"
     chmod 755 "$ss_dir"
+
+    ca_cert="${ss_dir}/stackwiz-ca.crt"
+    ca_key="${ss_dir}/stackwiz-ca.key"
+    fullchain="${ss_dir}/${host}.fullchain.crt"
+
+    if [ ! -f "$ca_cert" ] || [ ! -f "$ca_key" ]; then
+        openssl req -x509 -nodes -days 3650 -newkey rsa:4096 \
+            -keyout "$ca_key" -out "$ca_cert" \
+            -subj "/CN=stackwiz self-signed CA" \
+            -addext "basicConstraints=critical,CA:TRUE" \
+            -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1
+        chmod 600 "$ca_key"
+        chmod 644 "$ca_cert"
+    fi
 
     local san_parts="DNS:${host}"
     if [ -n "${STACKWIZ_TLS_EXTRA_IP:-}" ]; then
         san_parts="${san_parts},IP:${STACKWIZ_TLS_EXTRA_IP}"
     fi
 
-    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-        -keyout "$ss_key" \
-        -out "$ss_cert" \
-        -subj "/CN=${host}" \
-        -addext "subjectAltName=${san_parts}" >/dev/null 2>&1
+    local csr="${ss_dir}/${host}.csr"
+    local ext; ext="$(mktemp)"
+    cat > "$ext" <<EXT
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=${san_parts}
+EXT
+    openssl req -new -nodes -newkey rsa:2048 \
+        -keyout "$ss_key" -out "$csr" \
+        -subj "/CN=${host}" >/dev/null 2>&1
+    openssl x509 -req -in "$csr" -CA "$ca_cert" -CAkey "$ca_key" \
+        -CAcreateserial -days 365 -out "$ss_cert" \
+        -extfile "$ext" >/dev/null 2>&1
+    rm -f "$csr" "$ext"
+    cat "$ss_cert" "$ca_cert" > "$fullchain"
+
     chmod 600 "$ss_key"
-    chmod 644 "$ss_cert"
-    CERT_PATH="$ss_cert"; KEY_PATH="$ss_key"
-    echo "stackwiz-tls: generated self-signed cert for ${host}"
+    chmod 644 "$ss_cert" "$fullchain"
+    CERT_PATH="$fullchain"; KEY_PATH="$ss_key"
+    # Expose the CA separately so callers can publish it for sibling
+    # consumers that need to build trust (verify=PATH against this file).
+    CA_PATH="$ca_cert"
+    echo "stackwiz-tls: generated self-signed cert for ${host} (signed by stackwiz CA)"
 }
 
 # Install a certbot deploy hook that copies renewed certs into the shared
@@ -239,13 +302,20 @@ HOOK
 # --- Public API ---
 
 # stackwiz_tls_ensure <hostname>
-#   After successful return, $CERT_PATH and $KEY_PATH are set to paths on disk
-#   readable by root.
+#   After successful return:
+#     $CERT_PATH   full certificate (fullchain when self-signed,
+#                  LE's fullchain.pem otherwise) — serve this from TLS
+#     $KEY_PATH    private key — serve this from TLS
+#     $CA_PATH     path to a CA cert clients can pass as verify=PATH to
+#                  trust $CERT_PATH. Empty when LE was used (clients
+#                  fall back to system trust store). Non-empty when
+#                  self-signed — callers should publish it so sibling
+#                  consumers on the same host trust this cert.
 stackwiz_tls_ensure() {
     local host="${1:?hostname required}"
     local mode="${STACKWIZ_TLS_MODE:-auto}"
     local email="${CERTBOT_EMAIL:-admin@${host}}"
-    CERT_PATH=""; KEY_PATH=""
+    CERT_PATH=""; KEY_PATH=""; CA_PATH=""
 
     # 1. Reuse existing fresh cert.
     if stackwiz_tls_reuse_existing "$host"; then return 0; fi
