@@ -81,6 +81,31 @@ sw_log() { echo "[bootstrap] $*"; }
 sw_warn() { echo "warn: $*" >&2; }
 sw_err() { echo "error: $*" >&2; }
 
+# Well-known host path where stackwiz components publish artifacts that
+# sibling stacks on the same host are expected to trust/consume. Owned
+# by the framework; not namespaced per stack. Mounted into the installer
+# container at the same path (see sw_bootstrap_run) so env vars pointing
+# at files here are valid inside the container too.
+_SW_SHARED_DIR="/var/lib/stackwiz/shared"
+
+# Auto-detect a published Vault CA (written by vault.sh on first install)
+# and export VAULT_CACERT so sibling consumers on this host trust the
+# Vault cert without operator intervention.
+#
+# Skipped if the operator already set VAULT_CACERT or STACKWIZ_VAULT_VERIFY
+# — we never override explicit policy. Also skipped if the file doesn't
+# exist yet: on the Vault-owning host this only exists after vault.sh has
+# run once; on a greenfield install the engine's trust-on-first-use path
+# still kicks in post-install.
+sw_bootstrap_autoconfigure_vault_cacert() {
+  local shared_ca="${_SW_SHARED_DIR}/vault-ca.crt"
+  [ -n "${VAULT_CACERT:-}" ] && return 0
+  [ -n "${STACKWIZ_VAULT_VERIFY:-}" ] && return 0
+  [ -r "${shared_ca}" ] || return 0
+  export VAULT_CACERT="${shared_ca}"
+  sw_log "discovered Vault CA at ${shared_ca} (auto-exported VAULT_CACERT)"
+}
+
 # Emit curl TLS options for Vault. See stackwiz.vault_client.resolve_verify
 # for precedence:
 #   VAULT_CACERT=/path         → --cacert /path
@@ -482,10 +507,20 @@ sw_bootstrap_run() {
   env_args+=(-e "STACKWIZ_HOST_STATE_DIR=${STACKWIZ_STATE_DIR}")
   env_args+=(-e "STACKWIZ_HOST_MANIFEST_DIR=$PWD")
 
+  # Mount the framework shared dir (read-only) so published artifacts
+  # like the Vault CA are visible inside the container at the same path.
+  # Only when it exists — on first-ever install nothing has published
+  # there yet, and bind-mounting a missing source would fail.
+  local shared_mount_args=()
+  if [ -d "${_SW_SHARED_DIR}" ]; then
+    shared_mount_args+=(-v "${_SW_SHARED_DIR}:${_SW_SHARED_DIR}:ro")
+  fi
+
   sudo docker run "${docker_flags[@]}" \
     --privileged --pid=host --network=host \
     -v "${manifest_mount}" \
     -v "${STACKWIZ_STATE_DIR}:/state" \
+    "${shared_mount_args[@]}" \
     "${env_args[@]}" \
     "${STACKWIZ_IMAGE}" "$@"
 }
@@ -510,6 +545,10 @@ sw_bootstrap_main() {
   # discover_consul can use it.
   sw_bootstrap_load_consul_token
   sw_bootstrap_discover_consul
+  # Set VAULT_CACERT from the shared dir before probing Vault, so the
+  # probe's TLS handshake trusts the self-signed cert a sibling stack's
+  # vault.sh may have published.
+  sw_bootstrap_autoconfigure_vault_cacert
   sw_bootstrap_discover_vault
   sw_bootstrap_ensure_docker
   sw_bootstrap_pull_image
