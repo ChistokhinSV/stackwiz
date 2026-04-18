@@ -245,9 +245,20 @@ class VaultClient:
             f'{{ capabilities = ["create", "update", "read", "delete", "list"] }}\n'
             f'path "{mount}/metadata/{service_prefix}/{component_id}/*" '
             f'{{ capabilities = ["list", "read", "delete"] }}\n'
+            # Per-stack shared namespace — visible to every component in
+            # this stack. Historically the only "shared" path.
             f'path "{mount}/data/{service_prefix}/shared/*" '
             f'{{ capabilities = ["read"] }}\n'
             f'path "{mount}/metadata/{service_prefix}/shared/*" '
+            f'{{ capabilities = ["list", "read"] }}\n'
+            # Cross-stack shared namespace — the canonical discovery
+            # channel for artifacts a sibling stack publishes (e.g. 081's
+            # shared/authentik_api_token that 061's awx_authentik reads).
+            # Read-only under install tokens; writes require the project
+            # token (root-scoped or via stackwiz-<prefix> policy).
+            f'path "{mount}/data/shared/*" '
+            f'{{ capabilities = ["read"] }}\n'
+            f'path "{mount}/metadata/shared/*" '
             f'{{ capabilities = ["list", "read"] }}\n'
         )
         self._client.sys.create_or_update_policy(name=name, policy=hcl)
