@@ -256,9 +256,19 @@ sw_bootstrap_load_consul_token() {
 
 sw_bootstrap_discover_consul() {
   [ -n "${CONSUL_HTTP_ADDR:-}" ] && return 0
+  # Probe order: local-first, then nginx-fronted public endpoints.
+  #   1. http://127.0.0.1:8500    — same-host (port is loopback-bound)
+  #   2. http://consul.<dns>:8500  — legacy same-LAN path
+  #   3. https://consul.<dns>      — cross-host via nginx on 443
+  #   4. https://consul.<stackwiz-domain>  — when hostname -d doesn't
+  #      return the stackwiz domain, operator sets STACKWIZ_DOMAIN
+  local dom="${STACKWIZ_DOMAIN:-$(hostname -d 2>/dev/null || echo local)}"
   local addr
-  for addr in "http://127.0.0.1:8500" "http://consul.$(hostname -d 2>/dev/null || echo local):8500"; do
-    if curl -sf "${addr}/v1/status/leader" >/dev/null 2>&1; then
+  for addr in \
+      "http://127.0.0.1:8500" \
+      "http://consul.${dom}:8500" \
+      "https://consul.${dom}"; do
+    if curl -sfk "${addr}/v1/status/leader" >/dev/null 2>&1; then
       CONSUL_HTTP_ADDR="$addr"
       export CONSUL_HTTP_ADDR
       sw_log "discovered Consul at ${CONSUL_HTTP_ADDR}"

@@ -125,9 +125,18 @@ async def probe_consul(
             return ProbeResult(Source.ENV, addr, "CONSUL_HTTP_ADDR")
 
     host = host_override or f"consul.{domain}"
-    addr = f"http://{host}:{CONSUL_DEFAULT_PORT}"
-    if _dns_resolves(host) and await _http_ok(f"{addr}/v1/status/leader"):
-        return ProbeResult(Source.DOMAIN, addr, host)
+    if _dns_resolves(host):
+        # Native Consul HTTP API (port 8500). Works same-host when the
+        # port is loopback-bound AND the probe itself runs on that host.
+        addr = f"http://{host}:{CONSUL_DEFAULT_PORT}"
+        if await _http_ok(f"{addr}/v1/status/leader"):
+            return ProbeResult(Source.DOMAIN, addr, host)
+        # nginx-fronted HTTPS fallback (port 443). Stackwiz proxies
+        # Consul UI + API via https://consul.<domain>/ — works
+        # CROSS-HOST where port 8500 isn't externally reachable.
+        addr = f"https://{host}"
+        if await _http_ok(f"{addr}/v1/status/leader"):
+            return ProbeResult(Source.DOMAIN, addr, f"{host} (via nginx)")
 
     addr = f"http://127.0.0.1:{CONSUL_DEFAULT_PORT}"
     if await _http_ok(f"{addr}/v1/status/leader"):
@@ -156,10 +165,20 @@ async def probe_vault(
     has_token = bool(os.environ.get("VAULT_TOKEN", "").strip())
 
     async def _try(host: str) -> str | None:
-        # HTTPS first (verify-aware) — TLS-enabled Vault refuses plain HTTP.
+        # HTTPS on the native Vault port first (verify-aware). Works on
+        # the same-host case where 127.0.0.1:8200 is bound loopback-only.
         url = f"https://{host}:{VAULT_DEFAULT_PORT}"
         if await _vault_http_ok(f"{url}{health}", verify=verify):
             return url
+        # nginx-fronted fallback (port 443). Stackwiz deployments hide
+        # Vault behind nginx with a transparent proxy on
+        # https://vault.<domain>/ — works CROSS-HOST where port 8200
+        # isn't exposed externally. Try only when host looks like a
+        # DNS name, not an IP (port 443 on a raw IP is rarely Vault).
+        if "." in host and not host.replace(".", "").isdigit():
+            url = f"https://{host}"
+            if await _vault_http_ok(f"{url}{health}", verify=verify):
+                return url
         # HTTP fallback only when no token is in scope; otherwise skip so we
         # don't leak the token over plaintext.
         if has_token:
