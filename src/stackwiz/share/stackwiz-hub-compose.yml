@@ -1,0 +1,33 @@
+services:
+  hub:
+    image: ${STACKWIZ_HUB_IMAGE:-ghcr.io/chistokhinsv/stackwiz-hub:latest}
+    container_name: stackwiz-hub
+    restart: unless-stopped
+    environment:
+      CONSUL_HTTP_ADDR: ${STACKWIZ_HUB_CONSUL_ADDR:-http://consul:8500}
+      CONSUL_TOKEN:     ${STACKWIZ_HUB_CONSUL_TOKEN:-}
+      VAULT_ADDR:       ${STACKWIZ_HUB_VAULT_ADDR:-}
+      VAULT_TOKEN:      ${STACKWIZ_HUB_VAULT_TOKEN:-}
+      VAULT_KV_MOUNT:   ${STACKWIZ_HUB_VAULT_MOUNT:-stackwiz}
+      VAULT_VERIFY:     "false"
+      MCPJUNGLE_URL:    ${STACKWIZ_HUB_MCPJUNGLE_URL:-http://mcpjungle:8080}
+      KB_REPO_PATH:     /data/kb-repo
+      LOG_LEVEL:        INFO
+    volumes:
+      - /data/kb-repo:/data/kb-repo
+    logging:
+      driver: gelf
+      options:
+        gelf-address: "udp://127.0.0.1:12201"
+        tag: "{{.Name}}"
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f stackwiz-hub > /dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  default:
+    name: stackwiz-shared
+    external: true

@@ -140,6 +140,14 @@ class Engine:
                 self.vault.ensure_shared_kb_sync_keypair()
             except Exception as exc:  # noqa: BLE001
                 log.warning("kb-sync identity seed failed: %s", exc)
+            # Hub-reader policy mirrors the keypair seed — land it early
+            # so any downstream `vault.apply_hub_reader_policy` calls
+            # are no-ops, and a freshly-deployed stackwiz-hub has a
+            # readable policy from its very first reconcile.
+            try:
+                self.vault.apply_hub_reader_policy()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("hub-reader policy apply failed: %s", exc)
             self._upload_user_secrets()
             materialized = materialize_secrets(self.manifest, self.vault)
         result = EngineResult(secrets=materialized)
@@ -700,6 +708,13 @@ class Engine:
             self.vault.ensure_shared_kb_sync_keypair()
         except Exception as exc:  # noqa: BLE001
             log.warning("kb-sync identity seed failed: %s", exc)
+        # Ensure the hub-reader policy exists so the framework's
+        # stackwiz-hub daemon can read stackwiz/data/registry/* with
+        # a scoped token. Idempotent — safe to apply on every install.
+        try:
+            self.vault.apply_hub_reader_policy()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("hub-reader policy apply failed: %s", exc)
         if materialized:
             return materialized
         try:
@@ -770,7 +785,7 @@ class Engine:
             return
         for entry in component.registry:
             config_doc = {
-                "schema": 1,
+                "schema_version": 1,
                 "kind": entry.kind,
                 "name": entry.name,
                 "owner": self.manifest.name,
@@ -821,7 +836,7 @@ class Engine:
             if self.consul is not None:
                 try:
                     pointer = json.dumps({
-                        "schema": 1,
+                        "schema_version": 1,
                         "kind": entry.kind,
                         "name": entry.name,
                         "config_vault_path": (

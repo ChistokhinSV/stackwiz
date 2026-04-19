@@ -1,0 +1,46 @@
+# stackwiz-hub image — one-per-host registry reconciler.
+#
+# Reads stackwiz/registry/<kind>/<name> entries from Consul + Vault
+# and drives KB content sync + MCP server registration. See
+# src/stackwiz_hub/__init__.py for the full description.
+#
+# Ships from the same repo as the stackwiz engine — they share the
+# manifest.RegistryEntry schema, so coupled releases are a feature,
+# not a bug.
+
+FROM python:3.12-slim AS base
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_SYSTEM_PYTHON=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+# Minimal install: only the hub package + its runtime deps. Reuses
+# the same pyproject.toml as the engine so we pick up the pinned
+# versions of pydantic, httpx, etc — but we do NOT install textual,
+# click, dnspython, hvac, python-consul2 (engine-only deps).
+#
+# Strategy: copy pyproject + source, tell uv to resolve + install
+# only the hub's transitive deps. For now we just install the full
+# project — the engine deps are few and the convenience beats
+# maintaining two dep lists.
+COPY pyproject.toml README.md ./
+COPY src ./src
+
+RUN uv pip install --system --no-cache .
+
+VOLUME ["/data/kb-repo"]
+
+ENV STACKWIZ_HUB_LOG_LEVEL=INFO
+
+ENTRYPOINT ["stackwiz-hub"]
