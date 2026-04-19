@@ -389,6 +389,14 @@ server {
 
     location @goauthentik_proxy_signin {
         internal;
+        # Relative redirect: nginx would otherwise absolute-prefix with
+        # \$scheme://\$host:\$server_port, and since we listen on 8443
+        # inside the container the Location header ends up as
+        # https://host:8443/... — the client can't reach that (host
+        # only exposes 443 mapped to 8443). absolute_redirect off keeps
+        # the Location path-only so the browser reuses its current
+        # scheme/host/port (whatever the external edge is).
+        absolute_redirect       off;
         add_header              Set-Cookie \$auth_cookie;
         return                  302 /outpost.goauthentik.io/start?rd=\$request_uri;
     }
