@@ -344,13 +344,15 @@ server {
 
     location /outpost.goauthentik.io {
         # NOTE: proxy_pass with a variable (\$backend_proxy) disables
-        # nginx's automatic URI appending. Using \$request_uri on the
-        # right-hand side is the documented workaround — the subrequest
-        # URI (/outpost.goauthentik.io/auth/nginx) reaches the outpost
-        # intact. A literal URI here (the shape authentik's docs show)
-        # would strip the path suffix and every auth_request returns
-        # 404 → nginx-reported "auth request unexpected status: 404".
-        proxy_pass              \$backend_proxy\$request_uri;
+        # nginx's automatic URI appending. Use \$uri (the CURRENT
+        # request's URI) on the right-hand side so the subrequest's
+        # URI (/outpost.goauthentik.io/auth/nginx) reaches upstream
+        # intact. \$request_uri is the PARENT'S URI in a subrequest
+        # (typically just '/'), which routes to the outpost's root
+        # handler and returns 302 instead of 401 — nginx-reported
+        # "auth request unexpected status: 302". A literal URI here
+        # would strip the path suffix (404).
+        proxy_pass              \$backend_proxy\$uri;
         proxy_set_header        Host \$host;
         proxy_set_header        X-Original-URL \$scheme://\$http_host\$request_uri;
         add_header              Set-Cookie \$auth_cookie;
