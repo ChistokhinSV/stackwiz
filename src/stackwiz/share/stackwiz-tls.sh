@@ -247,6 +247,15 @@ stackwiz_tls_try_standalone() {
     local le_cert le_key
     read -r le_cert le_key < <(stackwiz_tls_le_paths "$host")
     echo "stackwiz-tls: requesting cert for ${host} via HTTP-01 standalone..."
+    # Free port 80 for certbot's ACME challenge. Stop BOTH:
+    #   - stackwiz-nginx container (the intended web server)
+    #   - any lingering host nginx systemd unit (Debian's nginx-common
+    #     pulls it in even with --no-install-recommends when certbot is
+    #     installed via certain paths, or the base image preinstalls it)
+    # Container is restarted by the caller (stackwiz_nginx_init retry);
+    # host nginx is LEFT OFF — it's never part of the stackwiz model and
+    # letting it auto-start again would race the container on next boot.
+    docker stop stackwiz-nginx 2>/dev/null || true
     systemctl stop nginx 2>/dev/null || true
     local ok=0
     if certbot certonly --standalone -d "$host" \
@@ -254,7 +263,8 @@ stackwiz_tls_try_standalone() {
         && [ -f "$le_cert" ] && [ -f "$le_key" ]; then
         ok=1
     fi
-    systemctl start nginx 2>/dev/null || true
+    # Don't restart host nginx — stackwiz_nginx_init is the canonical way
+    # to bring the web tier back up, and it uses the container.
     if [ "$ok" = "1" ]; then
         CERT_PATH="$le_cert"; KEY_PATH="$le_key"; CA_PATH=""
         echo "stackwiz-tls: obtained via HTTP-01 standalone"

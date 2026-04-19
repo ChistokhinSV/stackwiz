@@ -168,11 +168,22 @@ CONF
 }
 
 _stackwiz_nginx_ensure_container() {
+    # Already running — nothing to do.
     if docker ps --format '{{.Names}}' | grep -qxF "${STACKWIZ_NGINX_CONTAINER}"; then
         return 0
     fi
-    # Remove stale container (e.g. referencing a deleted network).
-    docker rm -f "${STACKWIZ_NGINX_CONTAINER}" 2>/dev/null || true
+    # Container EXISTS but is stopped (e.g. another stack's install
+    # called `docker stop stackwiz-nginx` for cert provisioning and
+    # never restarted). `docker start` is cheaper than compose
+    # recreate and preserves the existing container's configuration.
+    if docker ps -a --format '{{.Names}}' | grep -qxF "${STACKWIZ_NGINX_CONTAINER}"; then
+        if docker start "${STACKWIZ_NGINX_CONTAINER}" >/dev/null 2>&1; then
+            return 0
+        fi
+        # Start failed — container is in a bad state. Fall through to
+        # force-recreate via compose below.
+        docker rm -f "${STACKWIZ_NGINX_CONTAINER}" 2>/dev/null || true
+    fi
     if [ ! -f "${STACKWIZ_NGINX_COMPOSE}" ]; then
         _stackwiz_nginx_write_compose
     fi
@@ -189,6 +200,27 @@ _stackwiz_nginx_teardown() {
 
 # ---- Public API -------------------------------------------------------------
 
+_stackwiz_nginx_preempt_host_nginx() {
+    # Debian's certbot apt package (and some base images) pull in the
+    # `nginx` system package, which systemd auto-enables + auto-starts.
+    # That host nginx grabs port 80/443 — exactly what the stackwiz-nginx
+    # container wants. Symptom: `docker compose up stackwiz-nginx` fails
+    # with "address already in use". Stop + disable + mask so it stays
+    # off through reboots. Mask also neutralises recommends-pulled
+    # reinstalls triggered by later apt upgrades.
+    if [ -f /lib/systemd/system/nginx.service ] \
+        || [ -f /etc/systemd/system/nginx.service ]; then
+        if systemctl is-active nginx >/dev/null 2>&1 \
+            || systemctl is-enabled nginx >/dev/null 2>&1; then
+            systemctl stop nginx 2>/dev/null || true
+            systemctl disable nginx 2>/dev/null || true
+            systemctl mask nginx 2>/dev/null || true
+            echo "stackwiz-nginx: disabled + masked host nginx service " \
+                 "(port 80/443 reserved for stackwiz-nginx container)"
+        fi
+    fi
+}
+
 stackwiz_nginx_init() {
     # Idempotent: create dirs, default conf, compose file, start container.
     install -d -m 0755 "${STACKWIZ_NGINX_DIR}/conf.d" "${STACKWIZ_NGINX_DIR}/tls"
@@ -196,6 +228,10 @@ stackwiz_nginx_init() {
     if [ ! -f "${STACKWIZ_NGINX_DIR}/conf.d/00-stackwiz-default.conf" ]; then
         _stackwiz_nginx_write_default_conf
     fi
+
+    # Preempt any systemd-managed host nginx — must happen BEFORE
+    # _stackwiz_nginx_ensure_container tries to bind port 80/443.
+    _stackwiz_nginx_preempt_host_nginx
 
     _stackwiz_nginx_lock
     _stackwiz_nginx_ensure_container
