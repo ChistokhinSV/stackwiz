@@ -47,8 +47,47 @@ def read_sibling_state_token(state_dir: Path, filename: str) -> str | None:
     return None
 
 
-def resolve_vault_token(state_dir: Path) -> str | None:
-    """Token resolution order: own state > VAULT_TOKEN env > sibling state."""
+def read_sibling_scoped_vault_token(
+    state_dir: Path, service_prefix: str,
+) -> str | None:
+    """Find a sibling's scoped Vault token minted for ``service_prefix``.
+
+    The framework's secret engine writes per-consumer install tokens to
+    ``<state_dir>/stackwiz-tokens/<prefix>.token``. When installing a
+    second consumer on the same VM, we can pick up the scoped token that
+    an earlier sibling minted for *our* prefix — giving the right
+    privilege level without needing the operator to copy VAULT_TOKEN.
+    """
+    if not service_prefix:
+        return None
+    base = state_dir.parent
+    if not base.exists():
+        return None
+    filename = f"{service_prefix}.token"
+    for sibling in sorted(base.iterdir()):
+        if sibling == state_dir or not sibling.is_dir():
+            continue
+        candidate = sibling / "stackwiz-tokens" / filename
+        if candidate.exists():
+            try:
+                value = candidate.read_text().strip()
+                if value:
+                    return value
+            except OSError:
+                continue
+    return None
+
+
+def resolve_vault_token(
+    state_dir: Path, service_prefix: str | None = None,
+) -> str | None:
+    """Token resolution order: own state > VAULT_TOKEN env > sibling scoped
+    token (``stackwiz-tokens/<prefix>.token``) > sibling root vault-token.
+
+    Scoped sibling tokens are preferred over root tokens — the operator
+    gets correct least-privilege behaviour on same-VM multi-consumer
+    installs without having to copy VAULT_TOKEN between `.env` files.
+    """
     own = state_dir / "vault-token"
     if own.exists():
         value = own.read_text().strip()
@@ -57,6 +96,10 @@ def resolve_vault_token(state_dir: Path) -> str | None:
     env_value = os.environ.get("VAULT_TOKEN", "").strip()
     if env_value:
         return env_value
+    if service_prefix:
+        scoped = read_sibling_scoped_vault_token(state_dir, service_prefix)
+        if scoped:
+            return scoped
     sibling = read_sibling_state_token(state_dir, "vault-token")
     return sibling or None
 
@@ -129,6 +172,7 @@ def build_backends(
     consul_probe: ProbeResult,
     vault_probe: ProbeResult,
     ensure_kv_mount: bool = False,
+    service_prefix: str | None = None,
 ) -> tuple[ConsulClient | None, VaultClient | None]:
     """Build Consul + Vault clients from discovery probes.
 
@@ -139,12 +183,16 @@ def build_backends(
     When ``ensure_kv_mount`` is True, the KV mount is re-asserted on Vault —
     needed by the TUI on re-runs where the lazy-enable path has already
     finished on an earlier run. Errors are logged at WARNING and non-fatal.
+
+    ``service_prefix`` (from the manifest's ``consul.service_prefix``) lets
+    Vault-token resolution pick up a sibling's scoped install token on
+    same-VM multi-consumer deployments.
     """
     vault_client: VaultClient | None = None
     if vault_probe.reachable and vault_probe.address:
         vault_client = VaultClient(
             vault_probe.address,
-            token=resolve_vault_token(state_dir),
+            token=resolve_vault_token(state_dir, service_prefix=service_prefix),
         )
         if ensure_kv_mount:
             try:

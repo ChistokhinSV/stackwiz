@@ -9,6 +9,7 @@ import pytest
 from stackwiz.discovery import ProbeResult, Source
 from stackwiz.tokens import (
     build_backends,
+    read_sibling_scoped_vault_token,
     read_sibling_state_token,
     resolve_consul_token,
     resolve_vault_token,
@@ -73,6 +74,47 @@ def test_resolve_vault_sibling_last(
     (sibling / "vault-token").write_text("from-sibling")
     monkeypatch.delenv("VAULT_TOKEN", raising=False)
     assert resolve_vault_token(own) == "from-sibling"
+
+
+def test_resolve_vault_scoped_sibling_preferred_over_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same-VM multi-consumer: scoped token must win over the sibling's root token."""
+    monkeypatch.delenv("VAULT_TOKEN", raising=False)
+    own = tmp_path / "own"
+    own.mkdir()
+    sibling = tmp_path / "other"
+    (sibling / "stackwiz-tokens").mkdir(parents=True)
+    (sibling / "stackwiz-tokens" / "kb.token").write_text("scoped-kb")
+    (sibling / "vault-token").write_text("root-fallback")
+    assert resolve_vault_token(own, service_prefix="kb") == "scoped-kb"
+
+
+def test_resolve_vault_scoped_wrong_prefix_falls_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If no sibling has a matching scoped token, fall through to root."""
+    monkeypatch.delenv("VAULT_TOKEN", raising=False)
+    own = tmp_path / "own"
+    own.mkdir()
+    sibling = tmp_path / "other"
+    (sibling / "stackwiz-tokens").mkdir(parents=True)
+    (sibling / "stackwiz-tokens" / "awx.token").write_text("scoped-awx")
+    (sibling / "vault-token").write_text("root-fallback")
+    assert resolve_vault_token(own, service_prefix="kb") == "root-fallback"
+
+
+def test_read_sibling_scoped_returns_none_without_prefix(tmp_path: Path) -> None:
+    assert read_sibling_scoped_vault_token(tmp_path, "") is None
+
+
+def test_read_sibling_scoped_finds_token(tmp_path: Path) -> None:
+    own = tmp_path / "own"
+    own.mkdir()
+    sibling = tmp_path / "other"
+    (sibling / "stackwiz-tokens").mkdir(parents=True)
+    (sibling / "stackwiz-tokens" / "kb.token").write_text("kb-tok")
+    assert read_sibling_scoped_vault_token(own, "kb") == "kb-tok"
 
 
 # --- resolve_consul_token (the 4-source chain) ------------------------------

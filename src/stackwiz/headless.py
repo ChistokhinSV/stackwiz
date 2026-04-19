@@ -97,6 +97,7 @@ async def _run(
 
     consul_client, vault_client = build_backends(
         state_dir, consul_probe, vault_probe,
+        service_prefix=manifest.consul.service_prefix,
     )
     if vault_client is not None:
         log.info("vault: %s (%s)", vault_probe.address, vault_probe.source.value)

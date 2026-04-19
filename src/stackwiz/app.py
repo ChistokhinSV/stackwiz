@@ -116,4 +116,5 @@ class InstallerApp(App[int]):
             self.consul_probe,
             self.vault_probe,
             ensure_kv_mount=True,
+            service_prefix=self.manifest.consul.service_prefix,
         )

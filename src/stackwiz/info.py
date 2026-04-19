@@ -355,6 +355,7 @@ def render_info(
     consul_probe, vault_probe = asyncio.run(_probe_both())
     consul_client, vault_client = build_backends(
         state_dir, consul_probe, vault_probe,
+        service_prefix=manifest.consul.service_prefix,
     )
 
     report = collect(
