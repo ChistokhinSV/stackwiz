@@ -344,15 +344,19 @@ server {
 
     location /outpost.goauthentik.io {
         # NOTE: proxy_pass with a variable (\$backend_proxy) disables
-        # nginx's automatic URI appending. Use \$uri (the CURRENT
-        # request's URI) on the right-hand side so the subrequest's
-        # URI (/outpost.goauthentik.io/auth/nginx) reaches upstream
-        # intact. \$request_uri is the PARENT'S URI in a subrequest
-        # (typically just '/'), which routes to the outpost's root
-        # handler and returns 302 instead of 401 — nginx-reported
-        # "auth request unexpected status: 302". A literal URI here
-        # would strip the path suffix (404).
-        proxy_pass              \$backend_proxy\$uri;
+        # nginx's automatic URI + query appending. Use \$uri\$is_args\$args:
+        #   - subrequest (auth_request): \$uri=/outpost.goauthentik.io/auth/nginx
+        #     no args, forwards intact so the outpost returns 401.
+        #   - real browser (callback): \$uri=/outpost.goauthentik.io/callback,
+        #     \$args=X-authentik-auth-callback=true&code=...&state=...
+        #     forwards the query so the outpost can validate state.
+        # \$request_uri alone is wrong because in an auth_request subrequest
+        # it is the PARENT'S URI (just '/'), which routes to the outpost
+        # root and returns 302 -> "auth request unexpected status: 302".
+        # A literal URI here would strip the path suffix -> 404.
+        # Dropping args from the callback breaks the OAuth state check ->
+        # HTTP 400 after the Authentik login screen.
+        proxy_pass              \$backend_proxy\$uri\$is_args\$args;
         proxy_set_header        Host \$host;
         proxy_set_header        X-Original-URL \$scheme://\$http_host\$request_uri;
         add_header              Set-Cookie \$auth_cookie;
