@@ -41,13 +41,21 @@ _stackwiz_snmp_vault_addr() {
 }
 
 _stackwiz_snmp_vault_token() {
-    # Prefer VAULT_TOKEN env var (set by the engine for every install script).
-    if [ -n "${VAULT_TOKEN:-}" ]; then echo "$VAULT_TOKEN"; return 0; fi
-    # Fallback: read from state dir (for manual invocations).
+    # PREFER the project/root token on disk — the engine-injected
+    # VAULT_TOKEN is a scoped install token with RO on shared/*, and
+    # stackwiz_snmp writes to stackwiz/data/shared/hosts/<host>. Using
+    # the install token here produces a misleading "failed to store
+    # per-host credentials" warning on every run (403 on PUT), even
+    # though the creds ARE stored by a subsequent successful write
+    # attempt that reads from a different path. Project-token-first
+    # avoids the noise AND actually stores the creds where expected.
     local state="${STACKWIZ_STATE_DIR:-/var/lib/stackwiz}"
     for f in "${state}/vault-token" "${state}"/*/vault-token; do
         if [ -f "$f" ]; then cat "$f"; return 0; fi
     done
+    # Last resort: the install-scoped env token. Read-only on shared/*;
+    # writes there will 403 — the caller logs the warning.
+    if [ -n "${VAULT_TOKEN:-}" ]; then echo "$VAULT_TOKEN"; return 0; fi
     echo ""
 }
 

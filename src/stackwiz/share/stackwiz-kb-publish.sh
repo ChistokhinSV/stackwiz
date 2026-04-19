@@ -194,7 +194,11 @@ stackwiz_kb_authorize_sync_key() {
         _kb_publish_install_reconcile_timer
         echo "stackwiz-kb-publish: shared/kb_sync_ssh_pubkey absent in Vault — " \
              "wrote pending marker $marker; reconcile timer will re-try every 5 min" >&2
-        return 1
+        # Deferred state — NOT a failure. The reconcile timer handles
+        # authorization asynchronously as soon as the pubkey lands.
+        # Returning 1 here made every consumer install print a
+        # misleading "WARNING: kb-publish failed" on fresh hosts.
+        return 0
     fi
 
     # Create kb-sync user if it doesn't exist.
