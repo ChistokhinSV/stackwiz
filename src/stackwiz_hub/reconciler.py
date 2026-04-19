@@ -103,18 +103,26 @@ class Reconciler:
 
         # Reconcile MCP servers — track + prune deletes by diffing
         # the pointer list against the names we last registered.
+        # Only names whose upsert SUCCEEDED enter _known_mcp_names,
+        # so a failed registration retries on the next reconcile
+        # (otherwise a transient DNS / MCPJungle blip would leave
+        # the server permanently unregistered until KV changes).
         if self.mcpjungle is not None:
             desired = {doc.name for _, doc, _ in resolved if doc.kind == "mcp-server"}
             stale = self._known_mcp_names - desired
             for name in stale:
                 if self.mcpjungle.delete_server(name):
                     report.mcp_removed.append(name)
+            new_known = self._known_mcp_names - stale
             for _, doc, bearer in resolved:
                 if doc.kind != "mcp-server":
                     continue
                 if self.mcpjungle.upsert_server(doc, bearer):
                     report.mcp_registered.append(doc.name)
-            self._known_mcp_names = desired
+                    new_known.add(doc.name)
+                else:
+                    report.errors.append(f"mcp upsert failed: {doc.name}")
+            self._known_mcp_names = new_known
 
         # Reconcile KB sources — pull + commit.
         kb_changed = False

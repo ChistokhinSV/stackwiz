@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import signal
 import sys
+import time
 from datetime import datetime
 
 from stackwiz_hub.config import Settings, get_settings
@@ -117,14 +118,20 @@ def main() -> int:
     signal.signal(signal.SIGINT, _on_signal)
 
     index = 0
+    backoff_s = 1.0
     while not stop:
         try:
             index, report = reconciler.reconcile_once(since_index=index)
             log.info("reconcile idx=%d: %s", index, report.summary())
+            backoff_s = 1.0
         except Exception as exc:  # noqa: BLE001
-            # Wake up on the next safety timer; don't kill the loop
-            # on a transient Consul blip.
-            log.warning("reconcile failed: %s", exc)
+            # Exponential backoff so a dead Consul doesn't hammer
+            # logs at tens of thousands of lines per second. Cap at
+            # the safety-poll interval — past that, waiting longer
+            # helps nothing.
+            log.warning("reconcile failed: %s (sleep %.0fs)", exc, backoff_s)
+            time.sleep(backoff_s)
+            backoff_s = min(backoff_s * 2, float(s.reconcile_safety_interval_s))
 
     for c in (consul, vault, mcpjungle, kb_source, write_back):
         if c is not None:

@@ -65,7 +65,32 @@ EOF
         --env-file "${STACKWIZ_HUB_ENV}" \
         up -d 2>&1 | grep -vE '^\s*$' || true
 
+    # Attach the hub to consumer-owned networks where the target
+    # services (e.g. kb-mcpjungle) live. Compose only manages the
+    # "default" network (stackwiz-shared) — anything the hub needs
+    # to reach by container-DNS gets bolted on here. Idempotent:
+    # `docker network connect` errors if already attached; we swallow.
+    _stackwiz_hub_attach_extra_networks
     echo "stackwiz-hub: ensured container ${STACKWIZ_HUB_CONTAINER} up"
+}
+
+_stackwiz_hub_attach_extra_networks() {
+    # Connect stackwiz-hub to any network matching the known consumer
+    # patterns. Kept permissive — a fresh install of 077 creates
+    # kb-agent_kb-net; 082 creates config-analyzer_default; etc.
+    # Add patterns here as new consumers surface services the hub
+    # must reach by DNS.
+    local patterns=(
+        "kb-agent_kb-net"         # 077 — kb-mcpjungle
+        "config-analyzer_default" # 082 — reserved (hub talks to shared only today)
+    )
+    local net
+    for net in "${patterns[@]}"; do
+        if docker network inspect "${net}" >/dev/null 2>&1; then
+            docker network connect "${net}" "${STACKWIZ_HUB_CONTAINER}" \
+                >/dev/null 2>&1 || true
+        fi
+    done
 }
 
 stackwiz_hub_status() {
