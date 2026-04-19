@@ -28,7 +28,6 @@ from stackwiz.manifest import (
 )
 from stackwiz.secrets import MaterializedSecret
 
-
 # --- RegistryEntry field validation -----------------------------------------
 
 

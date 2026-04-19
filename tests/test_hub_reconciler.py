@@ -6,7 +6,6 @@ kind, prunes deleted MCPs, and doesn't crash on partial failures.
 """
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from unittest.mock import MagicMock
 

@@ -44,7 +44,15 @@ def _setup_logging(level: str) -> None:
     root.setLevel(level.upper())
 
 
-def _build_components(s: Settings) -> tuple[ConsulWatcher, VaultReader | None, MCPJungleClient | None, KBSourceClient, WriteBackClient]:
+def _build_components(
+    s: Settings,
+) -> tuple[
+    ConsulWatcher,
+    VaultReader | None,
+    MCPJungleClient | None,
+    KBSourceClient,
+    WriteBackClient,
+]:
     consul = ConsulWatcher(
         addr=s.consul_http_addr,
         token=s.consul_token,

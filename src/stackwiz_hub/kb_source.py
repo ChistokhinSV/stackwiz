@@ -12,7 +12,6 @@ committed by the reconciler's outer loop.
 """
 from __future__ import annotations
 
-import hashlib
 import io
 import logging
 import shutil

@@ -131,7 +131,7 @@ def kb_router(
         try:
             _extract_safely(body, root)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if git_commit_on_push and (root / ".git").is_dir():
             _commit_changes(root, git_author_name, git_author_email)
         return Response(status_code=204)

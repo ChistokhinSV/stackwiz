@@ -37,7 +37,10 @@ class Settings(BaseSettings):
     )
     vault_kv_mount: str = Field(
         default="stackwiz",
-        description="KV v2 mount name. Stackwiz mounts at 'stackwiz/', Vault's default is 'secret/'.",
+        description=(
+            "KV v2 mount name. Stackwiz mounts at 'stackwiz/'; "
+            "Vault's default is 'secret/'."
+        ),
     )
     vault_verify: bool = Field(
         default=False,
