@@ -260,7 +260,9 @@ class Engine:
                 script=self._script_for_action(component, action),
                 prepare=_prepare,
                 post_execute=post_execute,
-                post_publish=lambda c=component: self._post_component_publish(c, config_values),
+                post_publish=lambda c=component: self._post_component_publish(
+                    c, config_values, mat_box[0],
+                ),
                 persist=_persist,
             ))
         return steps
@@ -711,10 +713,14 @@ class Engine:
             return materialized
 
     def _post_component_publish(
-        self, component: Component, config_values: dict[str, Any],
+        self,
+        component: Component,
+        config_values: dict[str, Any],
+        materialized: dict[str, MaterializedSecret],
     ) -> None:
         """After a component's install script succeeds, publish its Consul
-        services, KV config, and apply the runtime read-only Vault policy."""
+        services, KV config, registry entries, and apply the runtime
+        read-only Vault policy."""
         prefix = self.manifest.consul.service_prefix
         if self.consul is not None:
             # force=True so a manifest check-config edit (e.g.
@@ -734,6 +740,107 @@ class Engine:
                 self.vault.apply_service_policy(prefix, component.id)
             except Exception as exc:  # noqa: BLE001
                 log.warning("%s: vault policy failed: %s", component.id, exc)
+        # Cross-stack discovery: each registry entry gets a Vault doc
+        # (config + optional bearer token) and a Consul KV pointer. The
+        # stackwiz-hub daemon (framework-owned, one per host) reads these
+        # to drive KB sync + MCP registration. See RegistryEntry in
+        # manifest.py.
+        self._publish_registry(component, materialized)
+
+    def _publish_registry(
+        self,
+        component: Component,
+        materialized: dict[str, MaterializedSecret],
+    ) -> None:
+        """Write each registry entry to Vault + mirror to Consul KV.
+
+        Path conventions:
+          stackwiz/data/registry/<kind>/<name>/config   — JSON document
+          stackwiz/data/registry/<kind>/<name>/token    — {"value": bearer}  (optional)
+          consul KV  stackwiz/registry/<kind>/<name>    — pointer JSON
+
+        The Consul KV value is a JSON pointer (not the full config)
+        because Consul KV has a 512KB per-key cap and we want bearer
+        rotation to be a single Vault write — consumers of the registry
+        re-read Vault on every KV change-notification.
+        """
+        import json
+
+        if not component.registry:
+            return
+        for entry in component.registry:
+            config_doc = {
+                "schema": 1,
+                "kind": entry.kind,
+                "name": entry.name,
+                "owner": self.manifest.name,
+                "component_id": component.id,
+                "endpoint": {
+                    "url": entry.endpoint_url,
+                    "transport": entry.transport,
+                    "paths": dict(entry.paths),
+                },
+                "auth": {
+                    "mode": "bearer" if entry.bearer_secret else "none",
+                    "token_ref": (
+                        f"registry/{entry.kind}/{entry.name}/token"
+                        if entry.bearer_secret else None
+                    ),
+                },
+                "tags": list(entry.tags),
+                "description": entry.description,
+            }
+            # Vault writes use the current (project/root) client token.
+            # The bearer value is pulled from materialized secrets and
+            # written to a sibling path; the hub reads both in one
+            # round-trip via the canonical token_ref.
+            if self.vault is not None:
+                try:
+                    self.vault.kv_put(
+                        f"registry/{entry.kind}/{entry.name}/config",
+                        {"value": json.dumps(config_doc)},
+                    )
+                    if entry.bearer_secret:
+                        secret = materialized.get(entry.bearer_secret)
+                        bearer_value = secret.value if secret is not None else ""
+                        self.vault.kv_put(
+                            f"registry/{entry.kind}/{entry.name}/token",
+                            {"value": bearer_value},
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "%s: registry vault publish %s/%s failed: %s",
+                        component.id, entry.kind, entry.name, exc,
+                    )
+                    continue
+            # Consul KV mirror — one key per entry. The value is a
+            # pointer payload so a blocking query on the prefix wakes
+            # the hub on any add/update/delete. Using a pointer rather
+            # than full config keeps each KV value tiny and bearer
+            # rotation a single Vault write.
+            if self.consul is not None:
+                try:
+                    pointer = json.dumps({
+                        "schema": 1,
+                        "kind": entry.kind,
+                        "name": entry.name,
+                        "config_vault_path": (
+                            f"registry/{entry.kind}/{entry.name}/config"
+                        ),
+                    })
+                    self.consul.kv_put(
+                        f"stackwiz/registry/{entry.kind}/{entry.name}",
+                        pointer,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "%s: registry consul KV %s/%s failed: %s",
+                        component.id, entry.kind, entry.name, exc,
+                    )
+        log.info(
+            "%s: published %d registry entries",
+            component.id, len(component.registry),
+        )
 
     def _write_summary_md_if_ok(self, result: EngineResult) -> None:
         """Write state_dir/summary.md when every selected component succeeded."""

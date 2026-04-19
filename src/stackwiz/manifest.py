@@ -95,6 +95,50 @@ class ConsulConfig(_LeafModel):
     service_prefix: str
 
 
+class RegistryEntry(_LeafModel):
+    """Cross-stack-discoverable resource a component exposes.
+
+    Canonical replacement for the current triad of (docker labels,
+    Consul service tags, Vault bearer-path conventions) used by
+    kb-source-sync + kb-mcp-registrar. The engine writes every entry
+    to Vault (stackwiz/data/registry/<kind>/<name>/{config,token}) and
+    mirrors a reference into Consul KV (stackwiz/registry/<kind>/<name>)
+    so a hub daemon can discover via a single blocking query.
+
+    One schema handles both KB sources (pull/push tarball paths) and
+    MCP servers (single url). Future kinds (authentik-app, nginx-vhost)
+    fit the same shape with different `paths` semantics.
+    """
+
+    kind: Literal["kb-source", "mcp-server"]
+    name: str
+    endpoint_url: str
+    # `http` for kb-source content endpoints; `streamable_http` / `sse`
+    # for MCP servers. The hub uses this to pick the right client.
+    transport: Literal["http", "streamable_http", "sse"] = "http"
+    # For kb-source: {pull: "/.kb/snapshot", push: "/.kb/push",
+    #   health: "/.kb/health"}. For mcp-server: typically empty
+    # (endpoint_url IS the MCP endpoint). Extra keys allowed for
+    # future kinds; the hub reads only the keys its kind uses.
+    paths: dict[str, str] = Field(default_factory=dict)
+    # Name of a secret declared in the manifest's top-level `secrets:`
+    # block. The engine materializes it and stores the value at the
+    # registry `token` path; the hub reads via its token_ref.
+    # Optional — omit for anonymous endpoints.
+    bearer_secret: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    description: str = ""
+
+    @field_validator("name")
+    @classmethod
+    def _name_slug(cls, v: str) -> str:
+        if not v or not all(c.isalnum() or c in "-_" for c in v):
+            raise ValueError(
+                f"registry entry name must be alphanumeric/-/_: {v!r}",
+            )
+        return v
+
+
 class Component(_LeafModel):
     id: str
     name: str
@@ -114,6 +158,12 @@ class Component(_LeafModel):
     consul_service: ConsulService | None = None
     consul_services: list[ConsulService] = Field(default_factory=list)
     consul_discover: list[ConsulDiscover] = Field(default_factory=list)
+    # Declarative cross-stack discovery. Each entry yields one
+    # stackwiz/data/registry/<kind>/<name>/{config,token} write at
+    # install time. Hub (framework-owned daemon) reads these to drive
+    # KB sync + MCP registration. Supersedes the current mix of docker
+    # labels + consul tags + manual Vault publishes.
+    registry: list[RegistryEntry] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
     # Config keys this component publishes to Consul KV under
     # ``{service_prefix}/config/<key>``. Empty list (the default) means
@@ -246,6 +296,25 @@ class Manifest(BaseModel):
                 if d not in ids:
                     raise ValueError(f"component {c.id!r} depends on unknown component {d!r}")
         self._topo_sort()  # raises on cycle
+        # RegistryEntry.bearer_secret must name a declared secret so the
+        # engine can materialize the value at publish time.
+        secret_ids = {s.id for s in self.secrets}
+        seen_registry: set[tuple[str, str]] = set()
+        for c in self.components:
+            for r in c.registry:
+                if r.bearer_secret and r.bearer_secret not in secret_ids:
+                    raise ValueError(
+                        f"component {c.id!r}: registry entry {r.name!r} references "
+                        f"bearer_secret {r.bearer_secret!r} which is not declared "
+                        f"in the manifest's `secrets:` block",
+                    )
+                key = (r.kind, r.name)
+                if key in seen_registry:
+                    raise ValueError(
+                        f"duplicate registry entry: kind={r.kind!r} name={r.name!r} "
+                        f"(second occurrence in component {c.id!r})",
+                    )
+                seen_registry.add(key)
         return self
 
     def _topo_sort(self) -> list[str]:

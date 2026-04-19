@@ -252,6 +252,30 @@ class VaultClient:
         except hvac.exceptions.VaultError:
             pass
 
+    def apply_hub_reader_policy(self, mount: str = KV_MOUNT) -> str:
+        """Create or update the ``stackwiz-hub-reader`` policy.
+
+        Grants read on ``{mount}/data/registry/*`` — the canonical path
+        tree written by the engine's `_publish_registry` step. The
+        framework's stackwiz-hub daemon (one per host) gets a token
+        under this policy at startup and reads every consumer's
+        registry entries (KB sources + MCP servers + future kinds)
+        through a single code path.
+
+        Replaces the old per-stack bearer-path mismatch (analyzer/
+        vs shared/ vs kb/) where 077's scoped token got 403 on
+        cross-stack reads. One registry tree, one read policy.
+        """
+        name = "stackwiz-hub-reader"
+        hcl = (
+            f'path "{mount}/data/registry/*" '
+            f'{{ capabilities = ["read"] }}\n'
+            f'path "{mount}/metadata/registry/*" '
+            f'{{ capabilities = ["list", "read"] }}\n'
+        )
+        self._client.sys.create_or_update_policy(name=name, policy=hcl)
+        return name
+
     def apply_shared_read_policy(self, mount: str = KV_MOUNT) -> str:
         """Create or update the ``stackwiz-shared-read`` policy.
 
