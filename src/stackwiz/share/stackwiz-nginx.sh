@@ -7,6 +7,9 @@
 #   stackwiz_nginx_init                          — ensure container + dirs exist
 #   stackwiz_nginx_add_conf  NS PRI NAME < file  — drop a namespaced vhost config
 #   stackwiz_nginx_add_cert  HOST CERT KEY        — copy cert+key for a hostname
+#   stackwiz_nginx_add_forwardauth_proxy         — TLS vhost gated by Authentik outpost
+#   stackwiz_nginx_add_basicauth_proxy           — TLS vhost gated by htpasswd
+#   stackwiz_nginx_write_htpasswd HOST USER PASS — write bcrypt htpasswd file
 #   stackwiz_nginx_reload                         — nginx -t + nginx -s reload
 #   stackwiz_nginx_remove_consumer NS             — remove all configs for NS
 #   stackwiz_nginx_ensure_network  NET            — connect container to a docker net
@@ -223,7 +226,7 @@ _stackwiz_nginx_preempt_host_nginx() {
 
 stackwiz_nginx_init() {
     # Idempotent: create dirs, default conf, compose file, start container.
-    install -d -m 0755 "${STACKWIZ_NGINX_DIR}/conf.d" "${STACKWIZ_NGINX_DIR}/tls"
+    install -d -m 0755 "${STACKWIZ_NGINX_DIR}/conf.d" "${STACKWIZ_NGINX_DIR}/tls" "${STACKWIZ_NGINX_DIR}/auth"
 
     if [ ! -f "${STACKWIZ_NGINX_DIR}/conf.d/00-stackwiz-default.conf" ]; then
         _stackwiz_nginx_write_default_conf
@@ -347,6 +350,12 @@ server {
         auth_request_set        \$auth_cookie \$upstream_http_set_cookie;
         proxy_pass_request_body off;
         proxy_set_header        Content-Length "";
+        # Allow self-signed outpost URLs (e.g. cross-host:
+        # https://auth.other-domain/outpost.goauthentik.io/...). Without
+        # proxy_ssl_verify off nginx rejects the stackwiz-CA cert and
+        # auth_request returns 502 — every login loops through 401.
+        proxy_ssl_verify        off;
+        proxy_ssl_server_name   on;
     }
 
     location / {
@@ -373,6 +382,67 @@ server {
         internal;
         add_header              Set-Cookie \$auth_cookie;
         return                  302 /outpost.goauthentik.io/start?rd=\$request_uri;
+    }
+}
+EOF
+}
+
+stackwiz_nginx_write_htpasswd() {
+    # Usage: stackwiz_nginx_write_htpasswd <hostname> <user> <password>
+    # Writes ${STACKWIZ_NGINX_DIR}/auth/<hostname>.htpasswd with a single
+    # APR1-hashed entry. Idempotent — overwrites the file each call.
+    # Uses openssl (alpine-compatible) instead of the httpd-tools htpasswd
+    # binary because the nginx container doesn't ship one.
+    local host="${1:?host required}" user="${2:?user required}" pass="${3:?password required}"
+    _stackwiz_nginx_check_hostname "$host" || return 1
+    _stackwiz_nginx_check_label user "$user" || return 1
+    install -d -m 0755 "${STACKWIZ_NGINX_DIR}/auth"
+    local target="${STACKWIZ_NGINX_DIR}/auth/${host}.htpasswd"
+    local hash
+    hash="$(openssl passwd -apr1 "$pass")" || return 1
+    printf '%s:%s\n' "$user" "$hash" > "${target}.tmp"
+    chmod 0644 "${target}.tmp"
+    mv -f "${target}.tmp" "${target}"
+}
+
+stackwiz_nginx_add_basicauth_proxy() {
+    # High-level: generate a TLS vhost gated by HTTP basic auth.
+    # Usage: stackwiz_nginx_add_basicauth_proxy <ns> <pri> <name> <hostname> <upstream> <htpasswd_container_path>
+    #
+    # <htpasswd_container_path> is the path INSIDE the nginx container —
+    # typically /etc/nginx/auth/<hostname>.htpasswd (the auth dir is bind-
+    # mounted from ${STACKWIZ_NGINX_DIR}/auth). Pair with
+    # stackwiz_nginx_write_htpasswd to create the file on the host side.
+    local ns="${1:?}" pri="${2:?}" name="${3:?}" hostname="${4:?}" upstream="${5:?}" htpasswd="${6:?}"
+    cat <<EOF | stackwiz_nginx_add_conf "${ns}" "${pri}" "${name}"
+server {
+    listen 8443 ssl;
+    http2 on;
+    server_name ${hostname};
+
+    ssl_certificate     /etc/nginx/tls/${hostname}.crt;
+    ssl_certificate_key /etc/nginx/tls/${hostname}.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    resolver 127.0.0.11 valid=10s ipv6=off;
+    set \$backend_upstream ${upstream};
+
+    location / {
+        auth_basic              "Restricted";
+        auth_basic_user_file    ${htpasswd};
+
+        proxy_pass              \$backend_upstream;
+        proxy_set_header        Host \$host;
+        proxy_set_header        X-Real-IP \$remote_addr;
+        proxy_set_header        X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header        X-Forwarded-Proto \$scheme;
+        proxy_set_header        Upgrade \$http_upgrade;
+        proxy_set_header        Connection "upgrade";
+        proxy_http_version      1.1;
+        proxy_ssl_verify        off;
+        proxy_read_timeout      300s;
+        proxy_send_timeout      300s;
+        client_max_body_size    50M;
     }
 }
 EOF
