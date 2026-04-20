@@ -27,3 +27,13 @@ services:
 networks:
   default:
     name: stackwiz-shared
+    # external: true — the network is (or may be) pre-created by
+    # another install in this lab (081's consul.sh creates it
+    # idempotently; so does 082's batfish.sh). Without this flag,
+    # compose refuses to attach to a network that doesn't carry
+    # its own `com.docker.compose.network: default` label — typical
+    # error:
+    #   "network stackwiz-shared was found but has incorrect label
+    #    com.docker.compose.network set to '' (expected: 'default')"
+    # Marking external tells compose to take what's there as-is.
+    external: true

@@ -190,6 +190,12 @@ _stackwiz_nginx_ensure_container() {
     if [ ! -f "${STACKWIZ_NGINX_COMPOSE}" ]; then
         _stackwiz_nginx_write_compose
     fi
+    # The compose file declares stackwiz-shared as external: true so
+    # it attaches to whichever network already exists (created by
+    # 081's consul.sh, 082's batfish.sh, etc.). If no prior install
+    # has created it yet — cold-bootstrap case — create it here so
+    # compose doesn't error "network X not found".
+    docker network create stackwiz-shared >/dev/null 2>&1 || true
     docker compose -f "${STACKWIZ_NGINX_COMPOSE}" up -d
 }
 
@@ -472,6 +478,8 @@ stackwiz_nginx_reload() {
     if ! docker ps --format '{{.Names}}' | grep -qxF "${STACKWIZ_NGINX_CONTAINER}"; then
         echo "stackwiz-nginx: container not running — restarting"
         if [ -f "${STACKWIZ_NGINX_COMPOSE}" ]; then
+            # Same external-network prep as _stackwiz_nginx_ensure_container.
+            docker network create stackwiz-shared >/dev/null 2>&1 || true
             docker compose -f "${STACKWIZ_NGINX_COMPOSE}" up -d --force-recreate
         fi
         sleep 1
