@@ -343,17 +343,22 @@ class VaultClient:
         policies: list[str],
         ttl: str = "2h",
         display_name: str = "stackwiz-install",
+        renewable: bool = False,
     ) -> str | None:
-        """Mint a non-renewable, non-orphan child token with narrow policies.
+        """Mint a non-orphan child token with narrow policies.
 
         Returns the token string, or None if minting fails (caller should warn
         and fall back to its own token — usually root — with a clear log line).
+
+        ``renewable=True`` is for long-lived runtime tokens (30-day TTL with
+        periodic ``auth/token/renew-self`` from the container). Default
+        ``False`` matches install-time child tokens which expire after TTL.
         """
         try:
             result = self._client.auth.token.create(
                 policies=policies,
                 ttl=ttl,
-                renewable=False,
+                renewable=renewable,
                 no_parent=False,
                 display_name=display_name,
             )

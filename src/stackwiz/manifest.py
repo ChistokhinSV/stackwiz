@@ -139,6 +139,32 @@ class RegistryEntry(_LeafModel):
         return v
 
 
+class VaultRuntime(_LeafModel):
+    """Long-lived, renewable Vault token minted for a component at install.
+
+    The install-time child token (engine._mint_install_token) is TTL 2h
+    and non-renewable — containers that outlive it start returning 404s
+    from Vault (permission-denied is rendered as 404 to avoid existence-
+    leak). Components that keep reading Vault at runtime declare this
+    block; the engine mints a separate renewable token with the service
+    policy + any extras listed, and writes it to token_file so the
+    container can mount it as a read-only secret.
+    """
+
+    # Extra named policies to attach in addition to the component's
+    # own service policy. "stackwiz-shared-read" is the common one
+    # (grants read on stackwiz/data/shared/*).
+    policies: list[str] = Field(default_factory=list)
+    # Vault TTL for the minted token. Renewable — the engine sets
+    # renewable=True at creation time; a sidecar or the container
+    # itself is expected to `auth/token/renew-self` before expiry.
+    ttl: str = "720h"
+    # Path on the host where the raw token value is written (0600).
+    # {component_id} is substituted. Containers mount this as a
+    # read-only volume (e.g. /run/secrets/vault_token).
+    token_file: str = "/opt/stackwiz/runtime-tokens/{component_id}.token"
+
+
 class Component(_LeafModel):
     id: str
     name: str
@@ -164,6 +190,9 @@ class Component(_LeafModel):
     # KB sync + MCP registration. Supersedes the current mix of docker
     # labels + consul tags + manual Vault publishes.
     registry: list[RegistryEntry] = Field(default_factory=list)
+    # Long-lived renewable Vault token — mount into the container so
+    # runtime reads survive past the 2h install-token TTL.
+    vault_runtime: VaultRuntime | None = None
     env: dict[str, str] = Field(default_factory=dict)
     # Config keys this component publishes to Consul KV under
     # ``{service_prefix}/config/<key>``. Empty list (the default) means

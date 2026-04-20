@@ -238,6 +238,12 @@ class Engine:
             def _prepare(c=component, a=action) -> tuple[dict[str, str], str | None]:
                 log.info("%s: %s", c.id, a.value)
                 token = self._mint_install_token(c)
+                # Runtime token written BEFORE the install script so
+                # `docker compose up` can mount the file. Post-publish
+                # would re-mint AFTER the first compose — wrong order
+                # for fresh installs (compose would see a missing path
+                # and Docker would synthesise a directory mount).
+                self._mint_runtime_token(c)
                 env = self._component_env(
                     c, config_values, mat_box[0], a, vault_token=token,
                 )
@@ -761,6 +767,67 @@ class Engine:
         # to drive KB sync + MCP registration. See RegistryEntry in
         # manifest.py.
         self._publish_registry(component, materialized)
+
+    def _mint_runtime_token(self, component: Component) -> None:
+        """Mint a renewable Vault token and write it to component.vault_runtime.token_file.
+
+        Idempotent: re-running overwrites the file with a fresh token so
+        the container always reads a fresh secret after a refresh. The
+        previous token is NOT revoked (operator can audit via
+        ``vault token lookup``); relying on TTL for eventual cleanup.
+        """
+        if component.vault_runtime is None or self.vault is None:
+            return
+        cfg = component.vault_runtime
+        prefix = self.manifest.consul.service_prefix
+        try:
+            service_policy = self.vault.apply_service_policy(prefix, component.id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "%s: runtime service policy failed: %s", component.id, exc,
+            )
+            return
+        # Ensure any named extras exist. "stackwiz-shared-read" is the
+        # common one — apply idempotently so operators don't have to
+        # pre-provision it.
+        extra_policies: list[str] = []
+        for name in cfg.policies:
+            if name == "stackwiz-shared-read":
+                try:
+                    extra_policies.append(self.vault.apply_shared_read_policy())
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "%s: apply stackwiz-shared-read failed: %s",
+                        component.id, exc,
+                    )
+            else:
+                # Trust the operator — named policy must already exist.
+                extra_policies.append(name)
+        policies = [service_policy, *extra_policies]
+        token = self.vault.create_child_token(
+            policies=policies,
+            ttl=cfg.ttl,
+            renewable=True,
+            display_name=f"stackwiz-runtime-{component.id}",
+        )
+        if token is None:
+            log.warning("%s: runtime token mint failed", component.id)
+            return
+        token_path = Path(cfg.token_file.format(component_id=component.id))
+        try:
+            token_path.parent.mkdir(parents=True, exist_ok=True)
+            token_path.write_text(token)
+            token_path.chmod(0o600)
+        except OSError as exc:
+            log.warning(
+                "%s: runtime token write %s failed: %s",
+                component.id, token_path, exc,
+            )
+            return
+        log.info(
+            "%s: runtime token written to %s (policies=%s, ttl=%s)",
+            component.id, token_path, policies, cfg.ttl,
+        )
 
     def _publish_registry(
         self,
