@@ -58,6 +58,63 @@ def test_kv_put_forwards_token(client: ConsulClient) -> None:
     client._client.kv.put.assert_called_once_with("x/y", "value", token="acl-token")
 
 
+def test_is_local_native_agent_defaults_false() -> None:
+    with patch("stackwiz.consul_client.consul.Consul") as consul_cls:
+        consul_cls.return_value = MagicMock()
+        c = ConsulClient("http://consul:8500")
+        assert c.is_local_native_agent is False
+
+
+def test_register_service_rewrites_loopback_for_remote_agent() -> None:
+    """Containerized / remote agent: 127.0.0.1 → node_ip (the existing behaviour)."""
+    from stackwiz.manifest import Component, ConsulService, ConsulServiceCheck
+
+    with patch("stackwiz.consul_client.consul.Consul") as consul_cls, \
+         patch("stackwiz.consul_client.consul.Check.tcp") as tcp_mock:
+        consul_cls.return_value = MagicMock()
+        tcp_mock.return_value = "check-obj"
+        c = ConsulClient("http://consul:8500", is_local_native_agent=False)
+        svc = ConsulService(
+            name="batfish", port=9996,
+            check=ConsulServiceCheck(tcp="127.0.0.1:9996"),
+        )
+        component = Component.model_validate({
+            "id": "batfish", "name": "Batfish", "install": "install/x.sh",
+            "consul_service": svc.model_dump(),
+        })
+        c.register_service(component, node_address="192.168.0.101")
+        # TCP check rewritten to the LAN IP.
+        tcp_mock.assert_called_once()
+        args = tcp_mock.call_args.args
+        assert args[0] == "192.168.0.101"
+        assert args[1] == 9996
+
+
+def test_register_service_skips_rewrite_for_local_native_agent() -> None:
+    """Native local agent: 127.0.0.1 stays 127.0.0.1 — agent hits host loopback directly."""
+    from stackwiz.manifest import Component, ConsulService, ConsulServiceCheck
+
+    with patch("stackwiz.consul_client.consul.Consul") as consul_cls, \
+         patch("stackwiz.consul_client.consul.Check.tcp") as tcp_mock:
+        consul_cls.return_value = MagicMock()
+        tcp_mock.return_value = "check-obj"
+        c = ConsulClient("http://127.0.0.1:8500", is_local_native_agent=True)
+        svc = ConsulService(
+            name="batfish", port=9996,
+            check=ConsulServiceCheck(tcp="127.0.0.1:9996"),
+        )
+        component = Component.model_validate({
+            "id": "batfish", "name": "Batfish", "install": "install/x.sh",
+            "consul_service": svc.model_dump(),
+        })
+        c.register_service(component, node_address="192.168.0.101")
+        # TCP check NOT rewritten — stays 127.0.0.1.
+        tcp_mock.assert_called_once()
+        args = tcp_mock.call_args.args
+        assert args[0] == "127.0.0.1"
+        assert args[1] == 9996
+
+
 def test_kv_get_returns_string_when_found(client: ConsulClient) -> None:
     client._client.kv.get.return_value = (0, {"Value": b"hello"})
     assert client.kv_get("x/y") == "hello"

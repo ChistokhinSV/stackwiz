@@ -202,8 +202,14 @@ def build_backends(
 
     consul_client: ConsulClient | None = None
     if consul_probe.reachable and consul_probe.address:
+        # Marker file dropped by stackwiz-consul-agent.sh when a native
+        # client agent is up. Signals to register_service that the
+        # 127.0.0.1→node_ip rewrite is wrong here — local agent
+        # resolves 127.0.0.1 to the same loopback services bind to.
+        local_native = (state_dir / "local-consul-agent").is_file()
         consul_client = ConsulClient(
             consul_probe.address,
             token=resolve_consul_token(state_dir, vault_client),
+            is_local_native_agent=local_native,
         )
     return consul_client, vault_client

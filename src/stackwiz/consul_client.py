@@ -22,11 +22,27 @@ class CatalogEntry:
 
 
 class ConsulClient:
-    """Thin facade around python-consul2 for the operations stackwiz needs."""
+    """Thin facade around python-consul2 for the operations stackwiz needs.
 
-    def __init__(self, address: str, token: str | None = None) -> None:
+    ``is_local_native_agent`` signals that the consul agent this client
+    talks to is a **native process on the same host** as the services
+    being registered (e.g. 079's stackwiz-consul-agent systemd unit, or
+    a host-network consul container). When True, the check-target
+    rewrite in register_service is a no-op — 127.0.0.1 in a service
+    check already points to the same loopback the agent will probe.
+    Default False matches the historical case of a containerized
+    consul-server whose netns isolates it from host loopback.
+    """
+
+    def __init__(
+        self,
+        address: str,
+        token: str | None = None,
+        is_local_native_agent: bool = False,
+    ) -> None:
         self.address = address.rstrip("/")
         self._token = token
+        self.is_local_native_agent = is_local_native_agent
         parsed = urlparse(address if "://" in address else f"http://{address}")
         self._client = consul.Consul(
             host=parsed.hostname or "127.0.0.1",
@@ -63,8 +79,13 @@ class ConsulClient:
         check = None
         if svc.check is not None:
             # Replace 127.0.0.1 in check URLs with the actual node address
-            # so Consul agent can reach the service on remote hosts.
+            # so a REMOTE or CONTAINERIZED consul agent can reach the
+            # service over the LAN. With a native local agent (systemd
+            # unit on the same host), 127.0.0.1 already maps to the same
+            # loopback the service binds, so no rewrite.
             def _rewrite(url: str) -> str:
+                if self.is_local_native_agent:
+                    return url
                 if node_address != "127.0.0.1":
                     return url.replace("127.0.0.1", node_address)
                 return url

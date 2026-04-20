@@ -203,6 +203,12 @@ stackwiz_consul_agent_install() {
     for i in $(seq 1 30); do
         if "${STACKWIZ_CONSUL_AGENT_BIN}" members 2>/dev/null | grep -q "$(hostname -s)"; then
             echo "stackwiz-consul-agent: joined — consul members lists $(hostname -s)"
+            # Marker file read by the stackwiz engine (_consul_client_kwargs
+            # in engine.py) to skip the 127.0.0.1→node_ip check rewrite —
+            # with a native local agent, 127.0.0.1 already resolves to the
+            # same loopback services bind to.
+            install -d -m 0755 "${STACKWIZ_STATE_DIR:-/var/lib/stackwiz}"
+            : > "${STACKWIZ_STATE_DIR:-/var/lib/stackwiz}/local-consul-agent"
             return 0
         fi
         sleep 1
@@ -227,6 +233,7 @@ stackwiz_consul_agent_uninstall() {
     rm -f "/etc/systemd/system/${STACKWIZ_CONSUL_AGENT_UNIT}"
     systemctl daemon-reload
     rm -f "${STACKWIZ_CONSUL_AGENT_CONFIG_DIR}/agent.hcl"
+    rm -f "${STACKWIZ_STATE_DIR:-/var/lib/stackwiz}/local-consul-agent"
     echo "stackwiz-consul-agent: uninstalled"
 }
 

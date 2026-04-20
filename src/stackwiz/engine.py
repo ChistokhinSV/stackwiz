@@ -625,7 +625,10 @@ class Engine:
             return
         token_file = self.state.state_dir / "consul-http-token"
         token = token_file.read_text().strip() if token_file.exists() else None
-        self.consul = ConsulClient(probe.address, token=token)
+        local_native = (self.state.state_dir / "local-consul-agent").is_file()
+        self.consul = ConsulClient(
+            probe.address, token=token, is_local_native_agent=local_native,
+        )
         log.info("consul adopted after install: %s", probe.address)
         # Register services for components that ran BEFORE consul existed
         # (e.g. 081 installs vault first, then consul).
