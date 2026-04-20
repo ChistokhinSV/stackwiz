@@ -62,6 +62,12 @@ class EngineResult:
     failed: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     secrets: dict[str, MaterializedSecret] = field(default_factory=dict)
+    # Operator-action items surfaced post-install: (component_id, [empty_secret_ids]).
+    # Populated by _check_component_secret_gaps for every component
+    # whose uses_secrets references optional secrets that materialized
+    # empty. Rendered as a final summary section so the message doesn't
+    # disappear in the middle of the install scroll.
+    secret_gaps: list[tuple[str, list[str]]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -171,6 +177,7 @@ class Engine:
             "install finished: %d ok, %d failed, %d skipped",
             len(result.succeeded), len(result.failed), len(result.skipped),
         )
+        self._emit_operator_action_summary(result)
         self._write_summary_md_if_ok(result)
 
     # --- uninstall --------------------------------------------------------------
@@ -237,6 +244,7 @@ class Engine:
             # step earlier in this run).
             def _prepare(c=component, a=action) -> tuple[dict[str, str], str | None]:
                 log.info("%s: %s", c.id, a.value)
+                self._check_component_secret_gaps(c, mat_box[0], result)
                 token = self._mint_install_token(c)
                 # Runtime token written BEFORE the install script so
                 # `docker compose up` can mount the file. Post-publish
@@ -932,6 +940,42 @@ class Engine:
             component.id, len(component.registry),
         )
 
+    def _check_component_secret_gaps(
+        self,
+        component: Component,
+        materialized: dict[str, MaterializedSecret],
+        result: EngineResult,
+    ) -> None:
+        """Warn when a component's declared optional secrets are empty.
+
+        uses_secrets is operator-facing guidance: the component will
+        still install (an optional secret materialized as ``""`` is a
+        legitimate "feature disabled" state), but the framework emits a
+        WARN + stashes a summary entry so the final install output tells
+        the operator which `./bootstrap.sh` action they just took won't
+        fully work until they fill the missing value.
+        """
+        if not component.uses_secrets:
+            return
+        empty: list[str] = []
+        for sid in component.uses_secrets:
+            mat = materialized.get(sid)
+            if mat is None or not mat.value:
+                empty.append(sid)
+        if not empty:
+            return
+        paths = [
+            f"stackwiz/{materialized[sid].vault_path}" if sid in materialized
+            else f"stackwiz/{self.manifest.consul.service_prefix}/{sid}"
+            for sid in empty
+        ]
+        log.warning(
+            "%s: optional secrets not set — %s. Fill them in "
+            ".stackwiz.secrets.env or set in Vault (%s) and re-run.",
+            component.id, ", ".join(empty), ", ".join(paths),
+        )
+        result.secret_gaps.append((component.id, empty))
+
     def _post_component_unpublish(self, component: Component) -> None:
         """Mirror of _publish_registry for the uninstall path.
 
@@ -974,6 +1018,36 @@ class Engine:
             "%s: unpublished %d registry entries",
             component.id, len(component.registry),
         )
+
+    def _emit_operator_action_summary(self, result: EngineResult) -> None:
+        """Print a tail-of-log section listing operator-action items.
+
+        Each component's _check_component_secret_gaps WARN during the
+        install scroll is easy to miss. This re-surfaces the same gaps
+        after the "install finished" line as a highlighted block so the
+        operator sees them without scrolling back through compose noise.
+
+        No-op when every uses_secrets entry was filled.
+        """
+        if not result.secret_gaps:
+            return
+        prefix = self.manifest.consul.service_prefix
+        secrets_env = self.executor.manifest_dir / ".stackwiz.secrets.env"
+        log.warning("")
+        log.warning("=" * 64)
+        log.warning("OPERATOR ACTION NEEDED — optional secrets left empty")
+        log.warning("=" * 64)
+        for component_id, empty in result.secret_gaps:
+            log.warning("  %s needs: %s", component_id, ", ".join(empty))
+        log.warning("")
+        log.warning("Set them in %s and re-run ./bootstrap.sh,", secrets_env)
+        log.warning("or push straight into Vault (survives re-installs):")
+        for _, empty in result.secret_gaps:
+            for sid in empty:
+                log.warning(
+                    "  vault kv put stackwiz/%s/%s value=<…>", prefix, sid,
+                )
+        log.warning("=" * 64)
 
     def _write_summary_md_if_ok(self, result: EngineResult) -> None:
         """Write state_dir/summary.md when every selected component succeeded."""

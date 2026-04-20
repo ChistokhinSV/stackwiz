@@ -92,6 +92,8 @@ def write_secrets_env_scaffold(
     for spec in specs:
         vault_path = secret_vault_path(manifest, spec)
         optional_tag = " (optional — leave empty to skip)" if spec.optional else ""
+        if spec.description:
+            lines.append(f"# {spec.description}")
         lines.append(f"# Vault path: {vault_path}{optional_tag}")
         value = existing.get(spec.id, "")
         lines.append(_yaml_line(spec.id, value))

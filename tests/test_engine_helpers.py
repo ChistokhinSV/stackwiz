@@ -203,3 +203,59 @@ def test_kv_payload_missing_key_silently_skipped(engine: Engine) -> None:
     component = engine.manifest.topo_order()[0]
     published = component.model_copy(update={"publishes": ["a", "missing"]})
     assert engine._kv_payload({"a": 1}, published) == {"a": 1}
+
+
+# --- _check_component_secret_gaps ------------------------------------------
+
+
+def test_secret_gaps_no_uses_secrets_is_noop(engine: Engine) -> None:
+    """Components with no uses_secrets contribute nothing to secret_gaps."""
+    from stackwiz.engine import EngineResult
+    component = engine.manifest.topo_order()[0]
+    result = EngineResult()
+    engine._check_component_secret_gaps(component, {}, result)
+    assert result.secret_gaps == []
+
+
+def test_secret_gaps_records_empty_materialized_values(engine: Engine) -> None:
+    """Optional secrets that materialized as '' land in secret_gaps."""
+    from stackwiz.engine import EngineResult
+    from stackwiz.secrets import MaterializedSecret
+
+    component = engine.manifest.topo_order()[0]
+    component = component.model_copy(
+        update={"uses_secrets": ["atlassian_api_token", "other_key"]}
+    )
+    materialized = {
+        "atlassian_api_token": MaterializedSecret(
+            id="atlassian_api_token",
+            vault_path="example/atlassian_api_token",
+            value="",
+            regenerated=False,
+        ),
+        "other_key": MaterializedSecret(
+            id="other_key",
+            vault_path="example/other_key",
+            value="set",
+            regenerated=False,
+        ),
+    }
+    result = EngineResult()
+    engine._check_component_secret_gaps(component, materialized, result)
+    assert result.secret_gaps == [(component.id, ["atlassian_api_token"])]
+
+
+def test_secret_gaps_all_filled_is_noop(engine: Engine) -> None:
+    from stackwiz.engine import EngineResult
+    from stackwiz.secrets import MaterializedSecret
+
+    component = engine.manifest.topo_order()[0]
+    component = component.model_copy(update={"uses_secrets": ["k"]})
+    materialized = {
+        "k": MaterializedSecret(
+            id="k", vault_path="example/k", value="v", regenerated=False,
+        ),
+    }
+    result = EngineResult()
+    engine._check_component_secret_gaps(component, materialized, result)
+    assert result.secret_gaps == []

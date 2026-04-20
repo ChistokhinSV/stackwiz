@@ -109,6 +109,23 @@ def test_manifest_bearer_secret_declared_passes() -> None:
     assert m.components[0].registry[0].bearer_secret == "my_bearer"
 
 
+def test_manifest_uses_secrets_must_be_declared() -> None:
+    """Typos in uses_secrets fail at load time so operators don't
+    discover the mistake only by never seeing the expected warning."""
+    with pytest.raises(ValidationError, match="uses_secrets"):
+        _make_manifest(uses_secrets=["atlasian_api_token"])  # typo: missing 's'
+
+
+def test_manifest_uses_secrets_declared_passes() -> None:
+    m = _make_manifest(
+        manifest_secrets=[
+            Secret(id="atlassian_api_token", generate=False, optional=True),
+        ],
+        uses_secrets=["atlassian_api_token"],
+    )
+    assert m.components[0].uses_secrets == ["atlassian_api_token"]
+
+
 def test_manifest_duplicate_kind_name_rejected() -> None:
     with pytest.raises(ValidationError, match="duplicate registry entry"):
         _make_manifest(

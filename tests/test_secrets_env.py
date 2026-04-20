@@ -280,3 +280,38 @@ def test_materialize_errors_with_pointer_when_file_empty(tmp_path: Path) -> None
     assert "smtp_password" in msg
     assert SECRETS_ENV_FILENAME in msg
     assert "example/smtp_password" in msg
+
+
+def test_scaffold_includes_description_above_key(tmp_path: Path) -> None:
+    """Description field (if set) is emitted as a comment line above
+    the key so operators editing the scaffold can see what each
+    secret is for without cross-referencing components.yaml."""
+    manifest = _with_user_secrets(
+        tmp_path,
+        "\n  - id: atlassian_api_token\n"
+        "    description: \"Atlassian API token from id.atlassian.com.\"\n"
+        "    generate: false\n"
+        "    optional: true\n",
+    )
+    target = tmp_path / SECRETS_ENV_FILENAME
+    write_secrets_env_scaffold(target, manifest)
+    text = target.read_text(encoding="utf-8")
+    # Description precedes the vault-path comment which precedes the key.
+    desc_idx = text.index("Atlassian API token from")
+    path_idx = text.index("Vault path: example/atlassian_api_token")
+    key_idx = text.index("atlassian_api_token:")
+    assert desc_idx < path_idx < key_idx
+
+
+def test_scaffold_omits_description_line_when_absent(tmp_path: Path) -> None:
+    """No description = no blank comment hash line."""
+    manifest = _with_user_secrets(
+        tmp_path,
+        "\n  - id: smtp_password\n    generate: false\n",
+    )
+    target = tmp_path / SECRETS_ENV_FILENAME
+    write_secrets_env_scaffold(target, manifest)
+    text = target.read_text(encoding="utf-8")
+    # Every comment line should be meaningful — no bare "# " followed
+    # immediately by the vault-path comment.
+    assert "# \n# Vault path:" not in text

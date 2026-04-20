@@ -201,6 +201,15 @@ class Component(_LeafModel):
     # ``state/config.yaml``. Declare only the keys other components /
     # external consumers need to discover at runtime.
     publishes: list[str] = Field(default_factory=list)
+    # Secret ids this component's runtime actually consumes. Purely
+    # advisory — the engine emits a WARN at install time when a listed
+    # optional secret materialized as an empty string, so operators
+    # discover "I enabled kb-atlassian-mcp but forgot to set the token"
+    # instead of finding out via container auth errors later. Does NOT
+    # gate installation. For `generate: false` non-optional secrets,
+    # materialize_secrets already hard-errors before install starts —
+    # no need to list those here, but also harmless if you do.
+    uses_secrets: list[str] = Field(default_factory=list)
 
     @field_validator("id")
     @classmethod
@@ -263,6 +272,13 @@ class ConfigField(_LeafModel):
 
 class Secret(_LeafModel):
     id: str
+    # Free-text operator-facing description. Rendered above the key in
+    # `.stackwiz.secrets.env` scaffolds so operators editing the file know
+    # what each secret is for and where to obtain it (e.g. "Atlassian
+    # API token from id.atlassian.com/manage-profile/security/api-tokens").
+    # Empty = no comment line. Kept short (<1 line); more detail belongs
+    # in the component KB runbook.
+    description: str = ""
     generate: bool = True
     # `length` semantics depend on `type`:
     #   password → output chars
@@ -326,10 +342,18 @@ class Manifest(BaseModel):
                     raise ValueError(f"component {c.id!r} depends on unknown component {d!r}")
         self._topo_sort()  # raises on cycle
         # RegistryEntry.bearer_secret must name a declared secret so the
-        # engine can materialize the value at publish time.
+        # engine can materialize the value at publish time. Same rule
+        # applies to `uses_secrets:` so typos surface at load time.
         secret_ids = {s.id for s in self.secrets}
         seen_registry: set[tuple[str, str]] = set()
         for c in self.components:
+            for sid in c.uses_secrets:
+                if sid not in secret_ids:
+                    raise ValueError(
+                        f"component {c.id!r}: uses_secrets references "
+                        f"{sid!r} which is not declared in the manifest's "
+                        f"`secrets:` block",
+                    )
             for r in c.registry:
                 if r.bearer_secret and r.bearer_secret not in secret_ids:
                     raise ValueError(
