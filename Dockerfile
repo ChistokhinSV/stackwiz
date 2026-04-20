@@ -28,6 +28,13 @@ RUN uv pip install --system --no-cache .
 RUN install -d /usr/local/share/stackwiz && \
     cp -a /app/src/stackwiz/share/. /usr/local/share/stackwiz/
 
+# Framework-owned KB articles — shipped inside the stackwiz image
+# so consumer stacks (currently 077's kb-core) can `docker cp` them
+# out and rsync into the central KB at install time. One-way push;
+# operators NEVER edit /framework-kb/*.md — edits go in the 079
+# repo and propagate on the next stackwiz image bump.
+COPY kb/articles/framework /framework-kb
+
 RUN mkdir -p /manifest /state
 VOLUME ["/manifest", "/state"]
 
