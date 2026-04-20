@@ -304,6 +304,11 @@ class Engine:
 
             def _cleanup_backends(c=component) -> None:
                 log.info("%s: uninstall", c.id)
+                # Clear registry entries before deregistering the service
+                # so the stackwiz-hub wake signal (Consul KV delete) fires
+                # first and the hub's MCPJungle delete_server call
+                # completes before the service disappears.
+                self._post_component_unpublish(c)
                 if self.consul is not None:
                     try:
                         self.consul.deregister_service(c)
@@ -924,6 +929,49 @@ class Engine:
                     )
         log.info(
             "%s: published %d registry entries",
+            component.id, len(component.registry),
+        )
+
+    def _post_component_unpublish(self, component: Component) -> None:
+        """Mirror of _publish_registry for the uninstall path.
+
+        For every registry entry the install wrote, delete both the
+        Consul KV pointer (the hub's wake signal — triggers the
+        reconciler to call MCPJungle's delete_server) AND the Vault
+        config/token docs (otherwise the hub re-reads stale state on
+        the next blocking-query wake and re-registers the entry).
+
+        Best-effort: failures are logged but do not block the rest of
+        the uninstall. Vault token paths may legitimately not exist
+        (entries without bearer_secret), so 404s are swallowed by the
+        client layer.
+        """
+        if not component.registry:
+            return
+        for entry in component.registry:
+            if self.consul is not None:
+                try:
+                    self.consul.kv_delete_tree(
+                        f"stackwiz/registry/{entry.kind}/{entry.name}",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "%s: registry consul KV delete %s/%s failed: %s",
+                        component.id, entry.kind, entry.name, exc,
+                    )
+            if self.vault is not None:
+                for suffix in ("config", "token"):
+                    try:
+                        self.vault.kv_delete_metadata(
+                            f"registry/{entry.kind}/{entry.name}/{suffix}",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug(
+                            "%s: registry vault delete %s/%s/%s: %s",
+                            component.id, entry.kind, entry.name, suffix, exc,
+                        )
+        log.info(
+            "%s: unpublished %d registry entries",
             component.id, len(component.registry),
         )
 
