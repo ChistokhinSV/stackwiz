@@ -1,0 +1,47 @@
+# Stackwiz Consul client-agent config — rendered by
+# stackwiz-consul-agent.sh at install time. Do not edit directly;
+# changes belong in the template at src/stackwiz/share/ in the 079
+# framework repo.
+
+datacenter = "prod"
+data_dir   = "${CONSUL_DATA_DIR}"
+log_level  = "INFO"
+
+# Client mode — this agent joins the server cluster and runs local
+# health checks for services registered through it. NOT a voter.
+server = false
+
+# Bind + advertise on the LAN so the server can reach gossip/health
+# responses. client_addr=0.0.0.0 so local services (docker containers
+# on this host via host.docker.internal, or native processes) can POST
+# to /v1/agent/service/register without cross-host routing.
+bind_addr      = "0.0.0.0"
+client_addr    = "0.0.0.0"
+advertise_addr = "${CONSUL_ADVERTISE_ADDR}"
+
+node_name = "${CONSUL_NODE_NAME}"
+
+# Gossip encryption — shared symmetric key published by 081 at
+# stackwiz/data/shared/consul_gossip_key. All members use the same
+# key; rotation is a coordinated restart of every consul process.
+encrypt = "${CONSUL_GOSSIP_KEY}"
+
+# Auto-join the server on startup, retry every 30s if unreachable.
+# retry_join is a list; single-element lists work fine in HCL.
+retry_join = ["${CONSUL_RETRY_JOIN}"]
+
+# ACLs are enabled cluster-wide (081's server sets default_policy=deny).
+# The per-agent "default" token below authorises this agent's gossip
+# + service-registration traffic. Anonymous clients to this agent's
+# HTTP API will still be denied.
+acl {
+  enabled        = true
+  default_policy = "deny"
+  down_policy    = "extend-cache"
+  ${CONSUL_ACL_TOKEN_STANZA}
+}
+
+ports {
+  grpc     = 8502
+  grpc_tls = -1
+}
