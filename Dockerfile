@@ -24,6 +24,16 @@ COPY src ./src
 
 RUN uv pip install --system --no-cache .
 
+# ansible-builder is invoked by 061/install/_build_ees.py via
+# `docker run --entrypoint ansible-builder` to materialise a Containerfile
+# + context from any playbook repo's ee/execution-environment.yml. Bundling
+# here keeps the host py-dep-free — the framework image is already the
+# installer's Swiss-army knife. ~20MB incremental. Pinned to the v3 series
+# because the CLI contract for `create --context` / `--file` stabilised
+# there and the Containerfile output shape is what downstream `docker build`
+# expects.
+RUN uv pip install --system --no-cache 'ansible-builder>=3,<4'
+
 # Expose helper scripts at a stable host path for engine staging.
 RUN install -d /usr/local/share/stackwiz && \
     cp -a /app/src/stackwiz/share/. /usr/local/share/stackwiz/
