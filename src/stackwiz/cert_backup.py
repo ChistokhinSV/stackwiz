@@ -35,7 +35,7 @@ import shutil
 import socket
 import tarfile
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Primary cert dirs. Order matters only for readability; restore treats
@@ -101,7 +101,7 @@ def backup(out_dir: Path) -> Path:
             "/etc/letsencrypt are both absent",
         )
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     out_tar = out_dir / f"stackwiz-certs-{_host_tag()}-{stamp}.tar.gz"
 
     with tempfile.TemporaryDirectory() as work_str:
@@ -194,7 +194,7 @@ def restore(tarball: Path, force: bool = False) -> list[Path]:
             _safe_extract(tar, work)
 
         restored: list[Path] = []
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         files_root = work / "files"
         if not files_root.is_dir():
             raise CertBackupError(
@@ -234,7 +234,7 @@ def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
         # Python <3.12 — best-effort sanity check.
         for m in tar.getmembers():
             if m.name.startswith("/") or ".." in Path(m.name).parts:
-                raise CertBackupError(f"unsafe tar member: {m.name!r}")
+                raise CertBackupError(f"unsafe tar member: {m.name!r}") from None
         tar.extractall(dest)
 
 
