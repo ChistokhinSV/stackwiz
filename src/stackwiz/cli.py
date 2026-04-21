@@ -480,6 +480,75 @@ def vault_shred_init(
     click.echo(f"shredded {removed}")
 
 
+@main.command("backup-cert")
+@click.argument("out_dir", type=click.Path(file_okay=False, path_type=Path),
+                required=False)
+def backup_cert(out_dir: Path | None) -> None:
+    """Save TLS cert material to a tarball (default: current dir).
+
+    Captures /etc/stackwiz/tls (self-signed CA + leaves + BYOC
+    overrides) and /etc/letsencrypt (LE state). Derived copies under
+    /opt/stackwiz/ are regenerated from these sources by install
+    scripts on the next `./bootstrap.sh run`, so they're deliberately
+    out of scope.
+    """
+    from stackwiz.cert_backup import CertBackupError, backup, encrypt_hint
+
+    target = out_dir or Path.cwd()
+    try:
+        tarball = backup(target)
+    except CertBackupError as exc:
+        click.echo(f"backup-cert: {exc}", err=True)
+        sys.exit(1)
+    click.echo(f"wrote {tarball} ({tarball.stat().st_size // 1024} KiB)")
+    click.echo("")
+    click.echo("The tarball contains CA + Let's Encrypt private keys.")
+    click.echo("Encrypt before moving off-host:")
+    click.echo(f"  {encrypt_hint(tarball)}")
+
+
+@main.command("restore-cert")
+@click.option("--force", is_flag=True, default=False,
+              help="Overwrite existing cert dirs (moved aside first).")
+@click.argument("tarball", type=click.Path(exists=True, dir_okay=False,
+                                           path_type=Path))
+def restore_cert(tarball: Path, force: bool) -> None:
+    """Restore TLS cert material from a tarball created by backup-cert."""
+    from stackwiz.cert_backup import CertBackupError, restore
+
+    try:
+        restored = restore(tarball, force=force)
+    except CertBackupError as exc:
+        click.echo(f"restore-cert: {exc}", err=True)
+        sys.exit(1)
+    if not restored:
+        click.echo(
+            "no paths restored — either nothing in the tarball applies, "
+            "or every target already exists (use --force to overwrite)",
+        )
+        return
+    click.echo("")
+    click.echo("Next: ./bootstrap.sh run --auto")
+    click.echo("  stackwiz-tls.sh's 30-day freshness check reuses the")
+    click.echo("  restored certs, install scripts re-populate derived")
+    click.echo("  copies (/opt/stackwiz/{vault,nginx}/tls, /var/lib/")
+    click.echo("  stackwiz/shared/vault-ca.crt).")
+
+
+@main.command("inspect-cert")
+@click.argument("tarball", type=click.Path(exists=True, dir_okay=False,
+                                           path_type=Path))
+def inspect_cert(tarball: Path) -> None:
+    """Show the manifest + file list of a cert backup tarball."""
+    from stackwiz.cert_backup import CertBackupError, inspect
+
+    try:
+        click.echo(inspect(tarball), nl=False)
+    except CertBackupError as exc:
+        click.echo(f"inspect-cert: {exc}", err=True)
+        sys.exit(1)
+
+
 @main.command()
 @_shared_opts
 @click.option("--show-secrets", is_flag=True, default=False,
