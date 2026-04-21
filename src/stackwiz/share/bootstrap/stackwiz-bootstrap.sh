@@ -471,6 +471,51 @@ sw_bootstrap_pull_image() {
   fi
 }
 
+# ---------- self-refresh ----------
+#
+# After pulling the installer image, check whether the vendored
+# `stackwiz-bootstrap.sh` on disk has drifted from the copy shipped in
+# the image. If so, overwrite the on-disk file and `exec` ourselves so
+# the rest of this invocation runs under the refreshed library — the
+# operator doesn't need to know about extract-bootstrap or re-run by
+# hand. Re-exec is guarded by SW_BOOTSTRAP_REEXEC so a single run
+# cannot loop on repeated drift-detection.
+#
+# Best-effort: silently skips on any failure (network, missing docker,
+# writable-mount semantics). The extra docker run is cheap (~100ms
+# against a warm daemon) and only extracts a single script from the
+# already-pulled image.
+sw_bootstrap_self_refresh() {
+  [ "${SW_BOOTSTRAP_REEXEC:-0}" = "1" ] && return 0
+  local self="${BASH_SOURCE[0]}"
+  [ -f "$self" ] || return 0
+  local tmp; tmp="$(mktemp)" || return 0
+  if ! sudo docker run --rm \
+        --entrypoint cat "${STACKWIZ_IMAGE}" \
+        /usr/local/share/stackwiz/bootstrap/stackwiz-bootstrap.sh \
+        > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; return 0
+  fi
+  if [ ! -s "$tmp" ] || cmp -s "$self" "$tmp"; then
+    rm -f "$tmp"; return 0
+  fi
+  sw_log "bootstrap library drift detected — refreshing from image"
+  # Try non-sudo first; the vendored file is typically user-owned.
+  if ! cp "$tmp" "$self" 2>/dev/null; then
+    if ! sudo cp "$tmp" "$self" 2>/dev/null; then
+      sw_warn "could not refresh ${self} — continuing with on-disk version"
+      rm -f "$tmp"
+      return 0
+    fi
+    sudo chown "$(id -u):$(id -g)" "$self" 2>/dev/null || true
+  fi
+  chmod +x "$self" 2>/dev/null || true
+  rm -f "$tmp"
+  export SW_BOOTSTRAP_REEXEC=1
+  sw_log "re-executing with refreshed bootstrap"
+  exec "$0" "$@"
+}
+
 # Parse positional args to set SW_HEADLESS and SW_WRITABLE_MANIFEST.
 # Writable resolution:
 #   - start from SW_WRITABLE_DEFAULT
@@ -620,6 +665,11 @@ sw_bootstrap_main() {
     backup-cert|restore-cert)
       sw_bootstrap_ensure_docker
       sw_bootstrap_pull_image
+      # Refresh on-disk library + re-exec if drift detected. Must run
+      # after pull_image (compare against just-pulled version) and
+      # before the fast-path so the re-exec picks up the new code for
+      # THIS invocation.
+      sw_bootstrap_self_refresh "$@"
       sw_cert_fast_path "$@" || exit $?
       local rc=0
       sw_bootstrap_run "${SW_CERT_CLI_ARGS[@]}" || rc=$?
@@ -639,6 +689,9 @@ sw_bootstrap_main() {
   sw_bootstrap_discover_vault
   sw_bootstrap_ensure_docker
   sw_bootstrap_pull_image
+  # Same refresh for the normal flow — same guarantees. Placed after
+  # pull_image so the comparison is against the fresh image.
+  sw_bootstrap_self_refresh "$@"
   sw_bootstrap_parse_args "$@"
 
   local rc=0
