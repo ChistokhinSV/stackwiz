@@ -219,6 +219,44 @@ def test_restore_force_moves_existing_aside(
     assert (tls / "chat.example.com.crt").read_text() == "LEAF CERT\n"
 
 
+def test_restore_survives_bind_mount_rename_ebusy(
+    cert_tree: tuple[Path, Path], tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Simulate restore against a bind-mount root — rename fails with
+    EBUSY, contents get moved into a .before-restore-<stamp> subdir,
+    and the restore still lays down the fresh tree into the mount."""
+    tls, le = cert_tree
+    tarball = backup(tmp_path)
+
+    # Add a pre-existing sentinel we'll check got moved into the subdir.
+    (le / "sentinel").write_text("MARKER\n")
+
+    # Force any rename of `le` (bind-mount root) to fail with EBUSY —
+    # the code path we can't otherwise trigger in unit tests.
+    original_rename = Path.rename
+
+    def fake_rename(self: Path, target: Path) -> Path:
+        if self == le:
+            raise OSError(16, "Device or resource busy")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", fake_rename)
+
+    restored = restore(tarball, force=True)
+    assert le in restored
+    # The contents-move fallback uses a dot-prefixed subdir INSIDE the
+    # original mount, not a timestamped sibling. le itself is unchanged.
+    aside = list(le.glob(".before-restore-*"))
+    assert len(aside) == 1
+    assert (aside[0] / "sentinel").read_text() == "MARKER\n"
+    # Fresh contents from the tarball are present alongside the .before-
+    # restore subdir (restore lays them down INTO le because dirs_exist_ok).
+    assert (le / "live").is_dir()
+    assert (le / "archive").is_dir()
+    assert not (le / "sentinel").exists()  # sentinel is in the subdir now
+
+
 def test_restore_rejects_traversal_attempt(tmp_path: Path) -> None:
     """Hand-craft a tarball with a member that tries to escape."""
     evil = tmp_path / "evil.tar.gz"

@@ -50,6 +50,41 @@ class CertBackupError(RuntimeError):
     """Raised for operator-facing failures (missing dirs, bad tarball)."""
 
 
+def _move_aside(host_path: Path, stamp: str) -> Path:
+    """Move ``host_path`` aside so a fresh copy can be laid down.
+
+    Two strategies:
+
+    1. Rename the dir to a timestamped sibling — works for regular
+       directories. Cleanest result (original tree at a predictable
+       path).
+    2. If rename fails with EBUSY (``host_path`` is a bind-mount root
+       inside a container, which is how restore-cert runs — the
+       bootstrap mounts /etc/letsencrypt directly), move the CONTENTS
+       into a ``.before-restore-<stamp>`` subdir inside the mount.
+       The outer dir is unchanged (can't be, it's a mount point), but
+       the original files are preserved in a predictable location.
+
+    Returns the path where the original contents now live.
+    """
+    sibling = Path(f"{host_path}.before-restore-{stamp}")
+    try:
+        host_path.rename(sibling)
+        host_path.mkdir(parents=True, exist_ok=True)
+        return sibling
+    except OSError:
+        pass  # fall through to contents-move
+
+    # Bind-mount root — rename forbidden. Move children into a subdir.
+    subdir = host_path / f".before-restore-{stamp}"
+    subdir.mkdir(parents=False, exist_ok=True)
+    for child in list(host_path.iterdir()):
+        if child == subdir:
+            continue
+        shutil.move(str(child), str(subdir / child.name))
+    return subdir
+
+
 def _strip_anchor(p: Path) -> Path:
     """Return path minus its root/anchor (leading '/', drive letter, …).
 
@@ -205,15 +240,18 @@ def restore(tarball: Path, force: bool = False) -> list[Path]:
             src = files_root / _strip_anchor(host_path)
             if not src.exists():
                 continue
-            if host_path.exists():
+            existing = host_path.exists() and any(host_path.iterdir())
+            if existing:
                 if not force:
                     print(f"  ! {host_path} already exists (pass --force to overwrite)")
                     continue
-                backup_path = Path(f"{host_path}.before-restore-{stamp}")
-                host_path.rename(backup_path)
-                print(f"  ~ moved existing {host_path} -> {backup_path}")
-            host_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(src, host_path, symlinks=True)
+                backup_loc = _move_aside(host_path, stamp)
+                print(f"  ~ moved existing {host_path} -> {backup_loc}")
+            host_path.mkdir(parents=True, exist_ok=True)
+            # dirs_exist_ok copies INTO the target when host_path is a
+            # bind-mount root (can't be removed + recreated from inside
+            # the container; _move_aside left it empty but extant).
+            shutil.copytree(src, host_path, symlinks=True, dirs_exist_ok=True)
             restored.append(host_path)
             print(f"  + restored {host_path}")
 
