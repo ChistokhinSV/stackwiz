@@ -535,6 +535,73 @@ sw_bootstrap_run() {
     "${STACKWIZ_IMAGE}" "$@"
 }
 
+# ---------- cert backup / restore ----------
+#
+# Run the shipped stackwiz-backup-cert.sh helper inside the installer
+# image with host cert paths bind-mounted. Avoids a separate host-side
+# install path for the helper and keeps a single source of truth: the
+# script lives in the image at /usr/local/share/stackwiz/ and manipulates
+# whatever is bind-mounted at /etc/stackwiz/tls + /etc/letsencrypt.
+#
+# --uts=host makes `hostname -s` inside the container return the VM's
+# hostname so the backup filename matches. --network=host alone shares
+# only the net namespace, not uts.
+sw_cmd_backup_cert() {
+  local out_dir="${1:-$(pwd)}"
+  if ! out_dir="$(cd "${out_dir}" 2>/dev/null && pwd)"; then
+    sw_err "backup-cert: output dir '${1:-$(pwd)}' does not exist"
+    return 2
+  fi
+
+  local mounts=(-v "${out_dir}:/out")
+  local have_any=0
+  if [ -d /etc/stackwiz/tls ]; then
+    mounts+=(-v /etc/stackwiz/tls:/etc/stackwiz/tls:ro); have_any=1
+  fi
+  if [ -d /etc/letsencrypt ]; then
+    mounts+=(-v /etc/letsencrypt:/etc/letsencrypt:ro); have_any=1
+  fi
+  if [ "${have_any}" -eq 0 ]; then
+    sw_err "backup-cert: no cert paths on this host"
+    sw_err "  /etc/stackwiz/tls and /etc/letsencrypt are both absent"
+    return 1
+  fi
+
+  sw_log "backup-cert: writing to ${out_dir}"
+  sudo docker run --rm \
+    --uts=host \
+    "${mounts[@]}" \
+    --entrypoint /usr/local/share/stackwiz/stackwiz-backup-cert.sh \
+    "${STACKWIZ_IMAGE}" backup /out
+}
+
+sw_cmd_restore_cert() {
+  local force=0
+  if [ "${1:-}" = "--force" ]; then force=1; shift; fi
+  local tarball="${1:-}"
+  if [ -z "${tarball}" ] || [ ! -f "${tarball}" ]; then
+    sw_err "restore-cert: tarball required"
+    sw_err "usage: ./bootstrap.sh restore-cert [--force] <tarball>"
+    return 2
+  fi
+
+  local tar_dir tar_name
+  tar_dir="$(cd "$(dirname "${tarball}")" && pwd)"
+  tar_name="$(basename "${tarball}")"
+
+  sw_log "restore-cert: reading ${tar_dir}/${tar_name}"
+  local restore_args=(restore)
+  [ "${force}" -eq 1 ] && restore_args+=(--force)
+  restore_args+=("/in/${tar_name}")
+
+  sudo docker run --rm \
+    -v /etc/stackwiz:/etc/stackwiz \
+    -v /etc/letsencrypt:/etc/letsencrypt \
+    -v "${tar_dir}:/in:ro" \
+    --entrypoint /usr/local/share/stackwiz/stackwiz-backup-cert.sh \
+    "${STACKWIZ_IMAGE}" "${restore_args[@]}"
+}
+
 # Reclaim ownership of any files the container wrote as root.
 sw_bootstrap_chown_outputs() {
   [ "${SW_WRITABLE_MANIFEST}" -eq 1 ] || return 0
@@ -550,6 +617,28 @@ sw_bootstrap_chown_outputs() {
 sw_bootstrap_main() {
   sw_bootstrap_source_env
   sw_bootstrap_require_sudo
+
+  # Fast-path for cert backup / restore. These operate on host TLS
+  # material (/etc/stackwiz/tls, /etc/letsencrypt) and don't need Consul
+  # / Vault discovery or the installer container's full state. They
+  # delegate to stackwiz-backup-cert.sh shipped inside the image.
+  case "${1:-}" in
+    backup-cert)
+      sw_bootstrap_ensure_docker
+      sw_bootstrap_pull_image
+      shift
+      sw_cmd_backup_cert "$@"
+      exit $?
+      ;;
+    restore-cert)
+      sw_bootstrap_ensure_docker
+      sw_bootstrap_pull_image
+      shift
+      sw_cmd_restore_cert "$@"
+      exit $?
+      ;;
+  esac
+
   sw_bootstrap_ensure_pkgs
   # Load on-disk token BEFORE Consul discovery so the ACL preflight in
   # discover_consul can use it.
