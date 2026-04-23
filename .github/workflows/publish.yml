@@ -35,6 +35,7 @@ jobs:
           STACKWIZ_EXECUTOR_MODE: direct
 
   image:
+    if: github.server_url == 'https://github.com'
     needs: [test, integration]
     runs-on: ubuntu-latest
     permissions:
@@ -78,6 +79,7 @@ jobs:
     # Hub ships as a sibling image (ghcr.io/.../stackwiz-hub). Coupled
     # release cadence with the engine image — both read the same
     # registry schema in manifest.py so drift would be a bug.
+    if: github.server_url == 'https://github.com'
     needs: [test, integration]
     runs-on: ubuntu-latest
     permissions:
